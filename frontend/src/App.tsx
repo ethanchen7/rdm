@@ -52,7 +52,11 @@ interface ConfirmState {
     onConfirm: () => void;
 }
 
-const API_BASE = import.meta.env.VITE_API_URL || '/rdpm/api';
+// Mount point the app is served from — '/' standalone, or '/rdpm/' (etc.)
+// behind a path-stripping reverse proxy. Derived from the page URL so no build
+// step is tied to a specific prefix. `VITE_API_URL` still overrides if set.
+const MOUNT_PATH = window.location.pathname.replace(/[^/]*$/, '');
+const API_BASE = import.meta.env.VITE_API_URL || `${MOUNT_PATH}api`;
 
 function App() {
     const [instances, setInstances] = useState<EC2Instance[]>([]);

@@ -1,6 +1,8 @@
 /// <reference path="./guacamole-lite.d.ts" />
 import express from 'express';
 import http from 'http';
+import https from 'https';
+import fs from 'fs';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -16,7 +18,24 @@ import Crypt from 'guacamole-lite/lib/Crypt';
 dotenv.config();
 
 const app = express();
-const server = http.createServer(app);
+
+// Optional built-in TLS so the app can run standalone over HTTPS — needed for
+// browser clipboard sync (secure context) — without a reverse proxy in front.
+// Point TLS_CERT/TLS_KEY at a cert + key (self-signed, mkcert, or a real cert);
+// with neither set it serves plain HTTP. guacamole-lite attaches to whichever
+// server is created below, so the WebSocket follows the same scheme (ws/wss).
+const TLS_CERT = process.env.TLS_CERT;
+const TLS_KEY = process.env.TLS_KEY;
+let server: http.Server | https.Server;
+if (TLS_CERT && TLS_KEY) {
+    server = https.createServer(
+        { cert: fs.readFileSync(TLS_CERT), key: fs.readFileSync(TLS_KEY) },
+        app
+    );
+    console.log('TLS enabled — serving HTTPS/WSS');
+} else {
+    server = http.createServer(app);
+}
 
 // Built by `npm run build` in ../frontend; nginx proxies /rdpm/ straight to
 // this service (see ../../deploy.json), so the SPA is served from here too.
@@ -318,7 +337,8 @@ const PORT = process.env.PORT || 3001;
 
 initDb().then(() => {
     server.listen(PORT, () => {
-        console.log(`Server listening on port ${PORT}`);
+        const scheme = (TLS_CERT && TLS_KEY) ? 'https' : 'http';
+        console.log(`Server listening on ${scheme}://localhost:${PORT}`);
     });
 }).catch(err => {
     console.error("Failed to initialize database:", err);

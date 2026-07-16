@@ -83,31 +83,43 @@ Browser (React SPA)  ──WebSocket──►  Backend (Express + guacamole-lite
 
 ## Accessing the app
 
-The SPA is built with a base path of **`/rdpm/`** and the frontend calls
-`/rdpm/api` and `/rdpm/ws`. In the reference deployment a reverse proxy maps
-`/rdpm/` → the backend (stripping the prefix). Example nginx:
+**No reverse proxy is required.** The SPA is built with a relative base and
+derives its API/WebSocket URLs from wherever the page is served, so it works both
+standalone and behind a path-stripping proxy — the same build, unchanged.
 
-```nginx
-location /rdpm/ {
-    proxy_pass http://127.0.0.1:3010/;   # note trailing slash: strips /rdpm
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;      # required for the WebSocket
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host $host;
-}
+### Standalone (simplest)
+
+After step 5, just open the backend directly:
+
 ```
-Then open `https://your-host/rdpm/`.
+http://localhost:3010/          # or http://<this-host-ip>:3010/
+```
 
-### Serving over HTTPS
+That's the whole deployment. To keep it running, use your process manager of
+choice (`systemd`, `pm2`, `docker`, …) to run `npm run start:backend`.
 
-Serve the app over **HTTPS**, not plain HTTP. Aside from the obvious (RDP
-credentials and the Guacamole token cross the wire), the browser **[Clipboard
-API][clipboard-api] only works in a secure context**, so device ↔ session
-copy/paste silently fails on `http://<LAN-IP>/`. `localhost` also counts as
-secure, so `http://localhost:3010/` is fine for local testing.
+> **HTTPS & the clipboard.** The browser [Clipboard API][clipboard-api] only
+> works in a *secure context* — HTTPS, or `http://localhost`. Over a plain-HTTP
+> **LAN IP** (`http://192.168.x.x:3010/`) device ↔ session copy/paste silently
+> no-ops (session-to-session still works, over the WebSocket). Two options:
+>
+> - **Built-in TLS** — set `TLS_CERT` and `TLS_KEY` in `backend/.env` to a cert +
+>   key and the server speaks HTTPS/WSS directly (no proxy). Generate a
+>   self-signed pair (or use [mkcert](https://github.com/FiloSottile/mkcert) for
+>   one your machines trust):
+>   ```bash
+>   openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+>     -keyout backend/tls.key -out backend/tls.crt \
+>     -subj "/CN=$(hostname -I | awk '{print $1}')"
+>   ```
+>   Then open `https://<host>:3010/`. Browsers warn on a self-signed cert but
+>   still grant secure-context status once you accept it.
+> - Or just use `http://localhost:3010/` on the same machine.
 
-TLS is terminated at the reverse proxy — the backend itself speaks plain HTTP on
-`127.0.0.1`. To add HTTPS to the nginx example above:
+### Behind a reverse proxy (optional)
+
+To host it at a path alongside other apps, point a proxy at the backend and strip
+the prefix. Example nginx serving it at `/rdpm/` over HTTPS:
 
 ```nginx
 server {
@@ -117,27 +129,21 @@ server {
     ssl_certificate_key /etc/ssl/private/your-host.key;
 
     location /rdpm/ {
-        proxy_pass http://127.0.0.1:3010/;   # note trailing slash: strips /rdpm
+        proxy_pass http://127.0.0.1:3010/;   # trailing slash strips the /rdpm prefix
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;      # required for the WebSocket
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
     }
 }
-# optional: redirect http → https
-server { listen 80; server_name your-host; return 301 https://$host$request_uri; }
 ```
 
-- **Public host:** use [Let's Encrypt](https://certbot.eff.org/) / `certbot` for a
-  trusted cert.
-- **LAN / IP-only host** (e.g. `192.168.1.72`): use a self-signed cert (or
-  [mkcert](https://github.com/FiloSottile/mkcert) to get one your machines trust).
-  Browsers will warn on a self-signed cert but still grant secure-context status
-  once you accept it, so the clipboard works.
+The relative asset/API/WS paths resolve correctly through the stripped prefix, so
+nothing in the build needs to know it's mounted at `/rdpm/`. Use
+[Let's Encrypt](https://certbot.eff.org/) for a trusted cert on a public host.
 
-**Self-hosting without the `/rdpm/` prefix?** Set `base: '/'` in
-`frontend/vite.config.ts`, rebuild, and point the API/WS at your backend via the
-`VITE_API_URL` / `VITE_WS_URL` env vars (read in `App.tsx` / `GuacamoleClient.tsx`).
+> Pinning the API/WS to a fixed origin (e.g. a separate API host)? Set
+> `VITE_API_URL` / `VITE_WS_URL` at build time to override the derived paths.
 
 ## Usage
 
@@ -155,7 +161,8 @@ server { listen 80; server_name your-host; return 301 https://$host$request_uri;
   > only expose in a *secure context* (HTTPS, or `http://localhost`). Over plain
   > HTTP on a LAN IP (e.g. `http://192.168.x.x/`) the copy-to-device / paste-from-device
   > direction silently no-ops — session-to-session clipboard still works because
-  > that goes over the Guacamole WebSocket. See [Serving over HTTPS](#serving-over-https).
+  > that goes over the Guacamole WebSocket. See [Accessing the app](#accessing-the-app)
+  > for the built-in TLS option.
 
 [clipboard-api]: https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API
 - **Settings** (gear) has global display options and your **month-to-date AWS spend**.
@@ -165,10 +172,10 @@ server { listen 80; server_name your-host; return 301 https://$host$request_uri;
 ```bash
 npm start          # runs backend + `vite dev` together (concurrently)
 ```
-The dev server serves the SPA under `/rdpm/`. Because Vite doesn't proxy the API
-by default, point the frontend at the backend during dev by setting
-`VITE_API_URL` / `VITE_WS_URL` (or add a `server.proxy` entry to `vite.config.ts`).
-For most changes it's simplest to `npm run build` and use `npm run start:backend`.
+Because Vite's dev server doesn't proxy the API by default, point the frontend at
+the backend during dev by setting `VITE_API_URL` / `VITE_WS_URL` (or add a
+`server.proxy` entry to `vite.config.ts`). For most changes it's simplest to
+`npm run build` and use `npm run start:backend`.
 
 ## Bigger clipboard limit (optional)
 
