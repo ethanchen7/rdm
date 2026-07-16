@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+/* Toast entrance — a small slide/fade so notifications feel responsive. */
+@keyframes toastIn {
+    from { opacity: 0; transform: translateY(10px) scale(0.98); }
+    to   { opacity: 1; transform: none; }
+}
+.toast-in { animation: toastIn 0.18s ease-out; }

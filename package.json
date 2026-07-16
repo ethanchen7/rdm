@@ -1,0 +1,12 @@
+{
+  "name": "rdpm",
+  "version": "1.0.0",
+  "scripts": {
+    "start:backend": "cd backend && npx ts-node src/index.ts",
+    "start:frontend": "cd frontend && npm run dev",
+    "start": "npx concurrently \"npm run start:backend\" \"npm run start:frontend\""
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

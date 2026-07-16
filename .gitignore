@@ -1,0 +1,20 @@
+# Dependencies & build output
+node_modules
+dist
+*.tsbuildinfo
+
+# Logs
+restart.log
+*.log
+
+# Secrets — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+key.pem
+
+# Local database (contains encrypted credentials)
+*.sqlite
+*.sqlite3
