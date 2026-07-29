@@ -59,6 +59,38 @@ interface ConfirmState {
 const MOUNT_PATH = window.location.pathname.replace(/[^/]*$/, '');
 const API_BASE = import.meta.env.VITE_API_URL || `${MOUNT_PATH}api`;
 
+// How often to re-poll AWS while an instance is mid-transition, and how long a
+// start/stop request may sit unacknowledged before we release the button rather
+// than spin forever (a boot or shutdown normally reports back well inside this).
+const TRANSITION_POLL_MS = 3000;
+const TRANSITION_TIMEOUT_MS = 5 * 60 * 1000;
+
+// Drops in-flight start/stop requests once AWS reports the instance has left
+// `from` (or it disappeared from the list entirely). From that point the
+// 'pending'/'stopping' state itself keeps the spinner going, so the button
+// never flips back to Start/Stop in the middle of a transition. Returns the
+// original object when nothing changed, to avoid pointless re-renders.
+const pruneRequests = (
+    requests: Record<string, boolean>,
+    stateById: Map<string, string>,
+    from: string
+) => {
+    const ids = Object.keys(requests);
+    const kept = ids.filter(id => stateById.get(id) === from);
+    if (kept.length === ids.length) return requests;
+    return Object.fromEntries(kept.map(id => [id, true]));
+};
+
+const clearRequests = (
+    setRequests: React.Dispatch<React.SetStateAction<Record<string, boolean>>>,
+    instanceIds: string[]
+) => setRequests(prev => {
+    if (!instanceIds.some(id => prev[id])) return prev;
+    const next = { ...prev };
+    instanceIds.forEach(id => delete next[id]);
+    return next;
+});
+
 function App() {
     const [instances, setInstances] = useState<EC2Instance[]>([]);
     const [activeSessions, setActiveSessions] = useState<Record<string, ActiveSession>>({});
@@ -198,6 +230,22 @@ function App() {
         localStorage.setItem('rdpm_header', isHeaderVisible.toString());
     }, [isHeaderVisible]);
 
+    // An instance counts as transitioning while we're waiting on a start/stop we
+    // sent (AWS can still report the old state for a moment) and for as long as
+    // it reports 'pending'/'stopping'. Deriving it from the reported state — not
+    // just from our own click — means a reload mid-boot still shows the spinner.
+    const isStarting = (inst: EC2Instance) => !!starting[inst.id] || inst.state === 'pending';
+    const isStopping = (inst: EC2Instance) => !!stopping[inst.id] || inst.state === 'stopping';
+    const anyTransitioning = instances.some(inst => isStarting(inst) || isStopping(inst));
+
+    // Poll while anything is mid-transition so the list lands on the new state on
+    // its own, instead of needing a manual refresh.
+    useEffect(() => {
+        if (!anyTransitioning) return;
+        const timer = setInterval(() => fetchInstances(true), TRANSITION_POLL_MS);
+        return () => clearInterval(timer);
+    }, [anyTransitioning]);
+
     const fetchBilling = async () => {
         try {
             const res = await fetch(`${API_BASE}/billing`);
@@ -219,18 +267,26 @@ function App() {
         }
     };
 
-    const fetchInstances = async () => {
-        setLoading(true);
-        setError('');
+    // `silent` is used by the transition poller below, which runs on a timer and
+    // shouldn't spin the toolbar refresh icon or surface transient errors.
+    const fetchInstances = async (silent = false) => {
+        if (!silent) {
+            setLoading(true);
+            setError('');
+        }
         try {
             const res = await fetch(`${API_BASE}/instances`);
             if (!res.ok) throw new Error(await res.text());
-            const data = await res.json();
+            const data: EC2Instance[] = await res.json();
             setInstances(data);
+            // Reconcile the requests we're still waiting on against reality.
+            const stateById = new Map(data.map(i => [i.id, i.state]));
+            setStarting(prev => pruneRequests(prev, stateById, 'stopped'));
+            setStopping(prev => pruneRequests(prev, stateById, 'running'));
         } catch (err: any) {
-            setError(err.message);
+            if (!silent) setError(err.message);
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 
@@ -401,11 +457,13 @@ function App() {
         });
     };
 
+    // Start/stop only *request* a transition — AWS takes a while to actually get
+    // there. So the spinner stays up past the API response and is only released
+    // once the instance reports the new state (see the poller below), with a
+    // watchdog so a request AWS never acts on doesn't spin forever.
     const startInstances = async (instanceIds: string[]) => {
         if (!instanceIds.length) return;
-        const newStarting = { ...starting };
-        instanceIds.forEach(id => newStarting[id] = true);
-        setStarting(newStarting);
+        setStarting(prev => ({ ...prev, ...Object.fromEntries(instanceIds.map(id => [id, true])) }));
 
         try {
             const res = await fetch(`${API_BASE}/instances/start`, {
@@ -414,23 +472,17 @@ function App() {
                 body: JSON.stringify({ instanceIds })
             });
             if (!res.ok) throw new Error(await res.text());
-            fetchInstances();
+            fetchInstances(true);
+            setTimeout(() => clearRequests(setStarting, instanceIds), TRANSITION_TIMEOUT_MS);
         } catch (err: any) {
             pushToast(`Failed to start: ${err.message}`, 'error');
-        } finally {
-            setStarting(prev => {
-                const next = { ...prev };
-                instanceIds.forEach(id => delete next[id]);
-                return next;
-            });
+            clearRequests(setStarting, instanceIds);
         }
     };
 
     const stopInstances = async (instanceIds: string[]) => {
         if (!instanceIds.length) return;
-        const newStopping = { ...stopping };
-        instanceIds.forEach(id => newStopping[id] = true);
-        setStopping(newStopping);
+        setStopping(prev => ({ ...prev, ...Object.fromEntries(instanceIds.map(id => [id, true])) }));
 
         try {
             const res = await fetch(`${API_BASE}/instances/stop`, {
@@ -439,15 +491,11 @@ function App() {
                 body: JSON.stringify({ instanceIds })
             });
             if (!res.ok) throw new Error(await res.text());
-            fetchInstances();
+            fetchInstances(true);
+            setTimeout(() => clearRequests(setStopping, instanceIds), TRANSITION_TIMEOUT_MS);
         } catch (err: any) {
             pushToast(`Failed to stop: ${err.message}`, 'error');
-        } finally {
-            setStopping(prev => {
-                const next = { ...prev };
-                instanceIds.forEach(id => delete next[id]);
-                return next;
-            });
+            clearRequests(setStopping, instanceIds);
         }
     };
 
@@ -463,8 +511,8 @@ function App() {
         });
     };
 
-    const runningEc2Ids = instances.filter(i => i.state === 'running').map(i => i.id);
-    const stoppedEc2Ids = instances.filter(i => i.state === 'stopped').map(i => i.id);
+    const runningEc2Ids = instances.filter(i => i.state === 'running' && !isStopping(i)).map(i => i.id);
+    const stoppedEc2Ids = instances.filter(i => i.state === 'stopped' && !isStarting(i)).map(i => i.id);
 
     const getGridClass = () => {
         switch (gridLayout) {
@@ -667,6 +715,8 @@ function App() {
                             const isConnected = !!activeSessions[inst.id];
                             const isRunning = inst.state === 'running';
                             const displayName = inst.label || inst.name;
+                            const busyStarting = isStarting(inst);
+                            const busyStopping = isStopping(inst);
                             return (
                                 <li key={inst.id} className={`w-full text-left px-3 py-2 rounded flex flex-col gap-2 group transition-colors ${
                                     isConnected
@@ -676,7 +726,9 @@ function App() {
                                     <div className="flex items-center justify-between">
                                         <div className="flex flex-col truncate">
                                             <div className="flex items-center gap-2">
-                                                <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-green-500' : 'bg-slate-500'}`}></span>
+                                                <span className={`w-2 h-2 rounded-full ${
+                                                    busyStarting || busyStopping ? 'bg-amber-500 animate-pulse' : isRunning ? 'bg-green-500' : 'bg-slate-500'
+                                                }`}></span>
                                                 <span className={`font-medium text-sm truncate ${isConnected ? 'text-blue-400' : 'text-slate-300'}`}>{displayName}</span>
                                             </div>
                                             <span className="text-xs opacity-60 truncate font-mono mt-0.5 ml-4">{inst.id}</span>
@@ -687,19 +739,19 @@ function App() {
                                         <div className="flex gap-2">
                                             <button
                                                 onClick={() => startInstances([inst.id])}
-                                                title="Start EC2"
-                                                disabled={isRunning || starting[inst.id]}
-                                                className={`p-1 rounded flex items-center justify-center w-6 h-6 ${isRunning ? 'opacity-30 cursor-not-allowed' : 'hover:bg-green-500/20 text-green-400'}`}
+                                                title={busyStarting ? 'Starting…' : 'Start EC2'}
+                                                disabled={isRunning || busyStarting || busyStopping}
+                                                className={`p-1 rounded flex items-center justify-center w-6 h-6 ${isRunning || busyStopping ? 'opacity-30 cursor-not-allowed' : 'hover:bg-green-500/20 text-green-400'}`}
                                             >
-                                                {starting[inst.id] ? <Loader2 size={16} className="animate-spin" /> : <PlayCircle size={16} />}
+                                                {busyStarting ? <Loader2 size={16} className="animate-spin" /> : <PlayCircle size={16} />}
                                             </button>
                                             <button
                                                 onClick={() => confirmStop([inst.id], displayName)}
-                                                title="Stop EC2"
-                                                disabled={!isRunning || stopping[inst.id]}
-                                                className={`p-1 rounded flex items-center justify-center w-6 h-6 ${!isRunning ? 'opacity-30 cursor-not-allowed' : 'hover:bg-red-500/20 text-red-400'}`}
+                                                title={busyStopping ? 'Stopping…' : 'Stop EC2'}
+                                                disabled={!isRunning || busyStopping || busyStarting}
+                                                className={`p-1 rounded flex items-center justify-center w-6 h-6 ${!isRunning || busyStarting ? 'opacity-30 cursor-not-allowed' : 'hover:bg-red-500/20 text-red-400'}`}
                                             >
-                                                {stopping[inst.id] ? <Loader2 size={16} className="animate-spin" /> : <StopCircle size={16} />}
+                                                {busyStopping ? <Loader2 size={16} className="animate-spin" /> : <StopCircle size={16} />}
                                             </button>
                                         </div>
                                         <button
