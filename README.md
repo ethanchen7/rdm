@@ -61,6 +61,14 @@ Browser (React SPA)  ──WebSocket──►  Backend (Express + guacamole-lite
    > See [Bigger clipboard limit](#bigger-clipboard-limit-optional) to build an
    > image with a higher cap.
 
+   The Settings modal shows whether guacd is reachable and can start, stop, or
+   restart it — it runs `docker <action> guacd`, so the account running the
+   backend needs Docker access (i.e. be in the `docker` group). Running guacd as
+   a systemd unit instead? Set `GUACD_SERVICE_CMD="sudo -n systemctl"` in
+   `backend/.env` and add a passwordless sudoers rule for those three commands.
+   Set `GUACD_SERVICE=` (blank) to remove the buttons. Note that anyone who can
+   reach the UI can use them — the app has no authentication of its own.
+
 3. **Configure the backend**
    ```bash
    cp backend/.env.example backend/.env

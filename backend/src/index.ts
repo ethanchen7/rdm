@@ -4,6 +4,8 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 import fs from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -186,16 +188,75 @@ const probeGuacd = () => new Promise<{ reachable: boolean; error?: string }>(res
 const guacdUnreachableMessage = (error?: string) =>
     `guacd is unreachable at ${GUACD_HOST}:${GUACD_PORT}${error ? ` (${error})` : ''} — check that the guacd service is running.`;
 
+// Waits for guacd to actually reach the state an action asked for, so the UI
+// reports what happened instead of what was requested — a restart in particular
+// is unreachable for a moment in the middle.
+const waitForGuacd = async (expectReachable: boolean, timeoutMs = 6000) => {
+    const deadline = Date.now() + timeoutMs;
+    let probe = await probeGuacd();
+    while (probe.reachable !== expectReachable && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+        probe = await probeGuacd();
+    }
+    return probe;
+};
+
+const execFileAsync = promisify(execFile);
+
+// Service control for guacd. `<cmd> <action> <service>` — which suits the
+// documented Docker setup as-is (`docker restart guacd`) and equally a systemd
+// unit via GUACD_SERVICE_CMD='sudo -n systemctl'. Leaving GUACD_SERVICE blank
+// disables control entirely. The action is always one of three fixed verbs and
+// the service name comes from config, so nothing from a request ever reaches the
+// command line — and execFile takes an argv, not a shell string.
+const GUACD_SERVICE = process.env.GUACD_SERVICE ?? 'guacd';
+const GUACD_SERVICE_CMD = process.env.GUACD_SERVICE_CMD || 'docker';
+const GUACD_ACTIONS = ['start', 'stop', 'restart'];
+// A `docker stop` waits out a 10s SIGTERM grace period, and a restart does that
+// then starts again, so this has to sit comfortably past both.
+const GUACD_ACTION_TIMEOUT_MS = 30000;
+
+const guacdStatus = (probe: { reachable: boolean; error?: string }) => ({
+    reachable: probe.reachable,
+    host: GUACD_HOST,
+    port: GUACD_PORT,
+    // Whether the Start/Stop/Restart controls can do anything on this host.
+    controllable: !!GUACD_SERVICE,
+    service: GUACD_SERVICE,
+    error: probe.reachable ? undefined : guacdUnreachableMessage(probe.error)
+});
+
 // Polled by the frontend when a session dies, to say whether guacd was the
 // reason rather than the remote desktop itself.
 app.get('/api/guacd', async (req, res) => {
-    const probe = await probeGuacd();
-    res.json({
-        reachable: probe.reachable,
-        host: GUACD_HOST,
-        port: GUACD_PORT,
-        error: probe.reachable ? undefined : guacdUnreachableMessage(probe.error)
-    });
+    res.json(guacdStatus(await probeGuacd()));
+});
+
+app.post('/api/guacd/:action', async (req, res) => {
+    const { action } = req.params;
+    if (!GUACD_ACTIONS.includes(action)) {
+        return res.status(400).json({ error: `Unsupported action '${action}'` });
+    }
+    if (!GUACD_SERVICE) {
+        return res.status(501).json({ error: 'guacd service control is disabled on this host (GUACD_SERVICE is unset).' });
+    }
+
+    const [cmd, ...prefixArgs] = GUACD_SERVICE_CMD.split(/\s+/).filter(Boolean);
+    if (!cmd) {
+        return res.status(501).json({ error: 'guacd service control is misconfigured (GUACD_SERVICE_CMD is empty).' });
+    }
+    try {
+        await execFileAsync(cmd, [...prefixArgs, action, GUACD_SERVICE], { timeout: GUACD_ACTION_TIMEOUT_MS });
+    } catch (err: any) {
+        // stderr is where the useful part lives — a missing sudoers rule, an
+        // unknown unit — so pass it through rather than a generic failure.
+        const detail = (err.stderr || err.message || '').toString().trim();
+        console.error(`Error running '${action}' on ${GUACD_SERVICE}:`, detail);
+        return res.status(500).json({ error: `Couldn't ${action} ${GUACD_SERVICE}: ${detail}` });
+    }
+
+    const probe = await waitForGuacd(action !== 'stop');
+    res.json({ ...guacdStatus(probe), action });
 });
 
 // Constructing GuacamoleLite attaches the WebSocket handler to `server`; we

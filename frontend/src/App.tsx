@@ -43,6 +43,19 @@ interface Billing {
     currency?: string;
 }
 
+// guacd — the daemon that actually speaks RDP. `controllable` is false when the
+// backend has no service configured to act on (GUACD_SERVICE unset).
+interface GuacdStatus {
+    reachable: boolean;
+    host: string;
+    port: number;
+    controllable: boolean;
+    service: string;
+    error?: string;
+}
+
+type GuacdAction = 'start' | 'stop' | 'restart';
+
 // Which instance the settings modal is editing, and in what mode.
 type InstanceModal =
     | { mode: 'add' }
@@ -246,6 +259,62 @@ function App() {
     // Settings Modal State
     const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
     const [globalSettings, setGlobalSettings] = useState({ fontSmoothing: true, colorDepth: '32' });
+
+    // guacd status + service control, shown in the settings modal.
+    const [guacd, setGuacd] = useState<GuacdStatus | null>(null);
+    const [guacdAction, setGuacdAction] = useState<GuacdAction | null>(null);
+
+    const fetchGuacd = useCallback(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/guacd`);
+            if (res.ok) setGuacd(await res.json());
+        } catch (e) {
+            console.error('Failed to fetch guacd status', e);
+        }
+    }, []);
+
+    // Only checked while the modal is open — it's a live TCP probe on the
+    // backend, not worth running against a closed dialog.
+    useEffect(() => {
+        if (isSettingsModalOpen) fetchGuacd();
+    }, [isSettingsModalOpen, fetchGuacd]);
+
+    const runGuacdAction = async (action: GuacdAction) => {
+        setGuacdAction(action);
+        try {
+            const res = await fetch(`${API_BASE}/guacd/${action}`, { method: 'POST' });
+            if (!res.ok) throw new Error(await readErrorMessage(res));
+            const status: GuacdStatus = await res.json();
+            setGuacd(status);
+            // The daemon settling into the expected state is the actual success
+            // condition — `systemctl start` returning 0 is not.
+            const expected = action !== 'stop';
+            if (status.reachable === expected) {
+                pushToast(`guacd ${action === 'stop' ? 'stopped' : action === 'start' ? 'started' : 'restarted'}`, 'success');
+            } else {
+                pushToast(status.error || `guacd did not ${action} — it is still ${status.reachable ? 'running' : 'down'}.`, 'error');
+            }
+        } catch (err: any) {
+            pushToast(err.message || `Failed to ${action} guacd`, 'error');
+            fetchGuacd();
+        } finally {
+            setGuacdAction(null);
+        }
+    };
+
+    // Stopping or restarting kills every live session, so both are confirmed.
+    const requestGuacdAction = (action: GuacdAction) => {
+        if (action === 'start') return runGuacdAction(action);
+        const openSessions = Object.keys(activeSessions).length;
+        setConfirm({
+            title: action === 'stop' ? 'Stop guacd' : 'Restart guacd',
+            message: openSessions
+                ? `${action === 'stop' ? 'Stopping' : 'Restarting'} guacd ends ${openSessions === 1 ? 'the open session' : `all ${openSessions} open sessions`} immediately. The instances themselves keep running.`
+                : `${action === 'stop' ? 'Stop' : 'Restart'} the guacd service? No sessions are open. ${action === 'stop' ? 'New connections will fail until it is started again.' : ''}`.trim(),
+            confirmLabel: action === 'stop' ? 'Stop guacd' : 'Restart guacd',
+            onConfirm: () => runGuacdAction(action)
+        });
+    };
 
     useEffect(() => {
         fetchInstances();
@@ -1059,6 +1128,63 @@ function App() {
                                 </div>
                                 <p className="text-xs text-slate-500 mt-1">Current statement so far this month, via AWS Cost Explorer. Data can lag a few hours.</p>
                             </div>
+
+                            {/* guacd — the daemon every session is proxied through.
+                                Restarting it is the usual fix when sessions stop
+                                connecting, so it's controllable from here. */}
+                            {(() => {
+                                const busy = guacdAction !== null;
+                                const ready = guacd !== null;
+                                const canControl = ready && guacd.controllable && !busy;
+                                const btn = 'flex-1 px-2 py-1.5 text-xs rounded border flex items-center justify-center gap-1.5 transition-colors disabled:opacity-30 disabled:cursor-not-allowed';
+                                return (
+                                    <div className="bg-slate-950 border border-slate-700 rounded p-3">
+                                        <div className="flex items-center justify-between">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`w-2 h-2 rounded-full ${
+                                                    !ready ? 'bg-slate-500' : guacd.reachable ? 'bg-green-500' : 'bg-red-500'
+                                                }`}></span>
+                                                <span className="text-sm text-slate-300">guacd service</span>
+                                            </div>
+                                            <button onClick={fetchGuacd} disabled={busy} className="text-slate-400 hover:text-white p-1 disabled:opacity-30" title="Re-check guacd">
+                                                <RefreshCw size={14} />
+                                            </button>
+                                        </div>
+                                        <div className="mt-1 text-xs text-slate-500 font-mono">
+                                            {!ready ? 'Checking…' : `${guacd.reachable ? 'Running' : 'Not reachable'} — ${guacd.host}:${guacd.port}`}
+                                        </div>
+                                        <div className="mt-3 flex gap-2">
+                                            <button
+                                                onClick={() => requestGuacdAction('start')}
+                                                disabled={!canControl || guacd.reachable}
+                                                className={`${btn} border-green-500/50 bg-green-500/10 text-green-300 hover:bg-green-500/20`}
+                                            >
+                                                {guacdAction === 'start' ? <Loader2 size={13} className="animate-spin" /> : <PlayCircle size={13} />} Start
+                                            </button>
+                                            <button
+                                                onClick={() => requestGuacdAction('stop')}
+                                                disabled={!canControl || !guacd.reachable}
+                                                className={`${btn} border-red-500/50 bg-red-500/10 text-red-300 hover:bg-red-500/20`}
+                                            >
+                                                {guacdAction === 'stop' ? <Loader2 size={13} className="animate-spin" /> : <StopCircle size={13} />} Stop
+                                            </button>
+                                            <button
+                                                onClick={() => requestGuacdAction('restart')}
+                                                disabled={!canControl}
+                                                className={`${btn} border-blue-500/50 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20`}
+                                            >
+                                                {guacdAction === 'restart' ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />} Restart
+                                            </button>
+                                        </div>
+                                        <p className="text-xs text-slate-500 mt-2">
+                                            {ready && !guacd.controllable
+                                                ? 'Service control is disabled on the server (GUACD_SERVICE is unset).'
+                                                : 'Proxies every RDP session. Stopping or restarting it ends all open sessions; the instances keep running.'}
+                                        </p>
+                                    </div>
+                                );
+                            })()}
+
                             <div className="flex items-center justify-between">
                                 <div>
                                     <label className="block text-sm text-slate-300">Enable Font Smoothing</label>
