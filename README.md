@@ -154,15 +154,22 @@ nothing in the build needs to know it's mounted at `/rdpm/`. Use
 - **Click a pane** to control it — the focused pane gets a **yellow** highlight,
   and keyboard input (including Ctrl/Alt combos) is routed only to that pane.
 - **Clipboard** is shared across all open sessions and your device (text only).
-  Copy in one session and it's available to paste in the others; text copied on
-  your device syncs into a session when you move the mouse into its pane.
-  > **HTTPS is required for device clipboard sync.** Reading/writing your local
+  Copy in one session and it's immediately pastable in every other session; text
+  copied on your device is picked up while the tab has focus (and the instant it
+  regains focus), so it's already in place when you go to paste.
+  > **HTTPS is required for *device* clipboard sync.** Reading/writing your local
   > clipboard uses the browser [Clipboard API][clipboard-api], which browsers
   > only expose in a *secure context* (HTTPS, or `http://localhost`). Over plain
   > HTTP on a LAN IP (e.g. `http://192.168.x.x/`) the copy-to-device / paste-from-device
   > direction silently no-ops — session-to-session clipboard still works because
   > that goes over the Guacamole WebSocket. See [Accessing the app](#accessing-the-app)
   > for the built-in TLS option.
+  >
+  > **Chromium-only for device→session.** Reading your clipboard needs the
+  > `clipboard-read` permission, which only Chromium-based browsers expose;
+  > Firefox and Safari raise a "Paste" confirmation on every read instead, so
+  > that direction stays off there. Session→session and session→device are
+  > unaffected.
 
 [clipboard-api]: https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API
 - **Settings** (gear) has global display options and your **month-to-date AWS spend**.

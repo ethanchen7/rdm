@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Maximize, Minimize, X, GripVertical } from 'lucide-react';
 import Guacamole from 'guacamole-common-js';
+import { writeDeviceClipboard } from './deviceClipboard';
 
 interface Props {
     instanceId: string;
@@ -30,6 +31,10 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
     // Last clipboard value this session has already sent to / received from its
     // remote, used to avoid echo loops and redundant re-pushes.
     const lastClipboard = useRef<string>('');
+    // Held in a ref because the connect effect below only re-runs on `token`,
+    // so it must not close over a stale callback.
+    const onClipboardRef = useRef(onClipboard);
+    onClipboardRef.current = onClipboard;
     const [isFullscreen, setIsFullscreen] = useState(false);
     // Explicit display size: the largest 16:9 rectangle that fits the grid cell
     // *below* the static header. Computed in JS because pure-CSS aspect-ratio
@@ -179,17 +184,12 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
             client.sendMouseState(scaledState);
         };
 
-        // Connect using the token
-        client.connect(`token=${token}`);
-
-        // Scale display to fit container visually when the pane itself resizes.
-        const resizeObserver = new ResizeObserver(() => scaleDisplay());
-        resizeObserver.observe(displayRef.current);
-
         // Remote copy -> shared clipboard. Publishing to the shared clipboard is
         // what makes copy/paste work *between* sessions: every other open session
         // then receives this text (see the broadcast effect below). We also make a
         // best-effort write to the OS clipboard so it can be pasted into local apps.
+        // Registered *before* connect() so a clipboard instruction that arrives
+        // early in the handshake isn't dropped.
         client.onclipboard = (stream, mimetype) => {
             if (mimetype === 'text/plain') {
                 const reader = new Guacamole.StringReader(stream);
@@ -197,13 +197,24 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
                 reader.ontext = (text) => { data += text; };
                 reader.onend = () => {
                     lastClipboard.current = data; // we already have it; don't push back
-                    onClipboard(data);
-                    if (navigator.clipboard && window.isSecureContext) {
-                        navigator.clipboard.writeText(data).catch(() => {});
-                    }
+                    onClipboardRef.current(data);
+                    void writeDeviceClipboard(data);
                 };
             }
         };
+
+        // This is a fresh remote with an unknown clipboard, so forget what the
+        // previous connection had been told. Otherwise a reconnect (new token)
+        // would see its own stale `lastClipboard` and skip re-sending the shared
+        // text, leaving the reconnected session unable to paste.
+        lastClipboard.current = '';
+
+        // Connect using the token
+        client.connect(`token=${token}`);
+
+        // Scale display to fit container visually when the pane itself resizes.
+        const resizeObserver = new ResizeObserver(() => scaleDisplay());
+        resizeObserver.observe(displayRef.current);
 
         const handleFullscreenChange = () => {
             setIsFullscreen(!!document.fullscreenElement);
@@ -250,19 +261,6 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [clipboard, status]);
-
-    // On entering a session, pull the OS clipboard so text copied on this device
-    // flows into the shared clipboard (and thus into every session).
-    const handleNativePaste = async () => {
-        try {
-            if (navigator.clipboard && window.isSecureContext) {
-                const text = await navigator.clipboard.readText();
-                if (text && text !== lastClipboard.current) onClipboard(text);
-            }
-        } catch (err) {
-            console.log("Clipboard paste failed", err);
-        }
-    };
 
     const toggleFullscreen = () => {
         // Fullscreen the grid cell (the pane's parent) rather than the pane
@@ -317,7 +315,6 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
                 className="relative flex items-center justify-center outline-none cursor-none overflow-hidden bg-black shrink-0"
                 style={box ? { width: box.w, height: box.h } : { flex: 1, width: '100%' }}
                 tabIndex={0}
-                onMouseEnter={handleNativePaste}
             />
         </div>
     );

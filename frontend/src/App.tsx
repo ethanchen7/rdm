@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Grid, LayoutGrid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check } from 'lucide-react';
 import { GuacamoleClient } from './GuacamoleClient';
+import { useDeviceClipboard } from './deviceClipboard';
 import './index.css';
 
 let toastSeq = 0;
@@ -85,7 +86,9 @@ function App() {
     const [customInstances, setCustomInstances] = useState<CustomInstance[]>([]);
     const [billing, setBilling] = useState<Billing | null>(null);
     // Shared clipboard across all open sessions (and this device), enabling
-    // copy/paste between sessions, not just device -> session.
+    // copy/paste between sessions, not just device -> session. Every pane pushes
+    // this text into its remote desktop, and reports back anything copied inside
+    // it (see GuacamoleClient), so a copy anywhere is pastable everywhere.
     const [sharedClipboard, setSharedClipboard] = useState('');
 
     // Per-instance loading states
@@ -128,6 +131,19 @@ function App() {
         setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), type === 'error' ? 7000 : 4000);
     }, []);
     const dismissToast = (id: number) => setToasts(prev => prev.filter(t => t.id !== id));
+
+    // Single entry point for "this text is the clipboard now". Deduping against
+    // the current value is what keeps sessions from echoing each other: a pane
+    // pushes text into its remote, the remote announces that same text back, and
+    // the republish lands here as a no-op instead of bouncing around the grid.
+    const publishClipboard = useCallback((text: string) => {
+        setSharedClipboard(prev => (prev === text ? prev : text));
+    }, []);
+
+    // Device (OS) clipboard -> shared clipboard. Polled while this tab has focus
+    // and re-read the moment it regains focus, so text copied in another app is
+    // already in every session by the time you go to paste it.
+    useDeviceClipboard(publishClipboard);
 
     // Settings Modal State
     const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
@@ -745,7 +761,7 @@ function App() {
                                         name={name}
                                         ip={ip}
                                         clipboard={sharedClipboard}
-                                        onClipboard={setSharedClipboard}
+                                        onClipboard={publishClipboard}
                                         onDisconnect={() => disconnectInstance(session.instanceId)}
                                         onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
                                         onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
