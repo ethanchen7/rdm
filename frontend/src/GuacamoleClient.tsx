@@ -9,6 +9,10 @@ interface Props {
     name: string;
     ip: string;
     onDisconnect: () => void;
+    // Reported when the session fails rather than being closed deliberately —
+    // guacd down, the tunnel dropping, an RDP-level refusal. The pane goes away
+    // either way, so without this the failure would be invisible.
+    onError?: (message: string) => void;
     // Reorder support: the grip in the header is the drag handle. The parent
     // grid cell is the drop target (see App.tsx), so these just report when a
     // drag of this pane starts/ends.
@@ -22,7 +26,7 @@ interface Props {
     onClipboard: (text: string) => void;
 }
 
-export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
+export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
     const rootRef = useRef<HTMLDivElement>(null);
     const headerRef = useRef<HTMLDivElement>(null);
     const displayRef = useRef<HTMLDivElement>(null);
@@ -35,6 +39,13 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
     // so it must not close over a stale callback.
     const onClipboardRef = useRef(onClipboard);
     onClipboardRef.current = onClipboard;
+    const onErrorRef = useRef(onError);
+    onErrorRef.current = onError;
+    // Whether this session ever reached 'Connected', and whether it failed. A
+    // disconnect that follows neither a failure nor a live session is the tunnel
+    // dying on the way up — worth reporting, unlike a normal close.
+    const wasConnected = useRef(false);
+    const failed = useRef(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     // Explicit display size: the largest 16:9 rectangle that fits the grid cell
     // *below* the static header. Computed in JS because pure-CSS aspect-ratio
@@ -100,6 +111,17 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
         client.onerror = (error) => {
             console.error('Guacamole Error:', error);
             setStatus(`Error: ${error.message}`);
+            failed.current = true;
+            onErrorRef.current?.(error.message || 'the connection failed');
+        };
+        // The tunnel dies on its own when the WebSocket can't be served — most
+        // often because guacd isn't there for the backend to hand off to — and
+        // that never reaches client.onerror.
+        tunnel.onerror = (error) => {
+            console.error('Guacamole Tunnel Error:', error);
+            setStatus(`Error: ${error.message}`);
+            failed.current = true;
+            onErrorRef.current?.(error.message || 'the tunnel closed');
         };
 
         // State change handler
@@ -110,6 +132,7 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
                 case 2: setStatus('Waiting...'); break;
                 case 3:
                     setStatus('Connected');
+                    wasConnected.current = true;
                     // Ensure we're scaled once the connection is live, even if
                     // the remote size arrived before the container was measured.
                     scaleDisplay();
@@ -119,6 +142,12 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
                     break;
                 case 5:
                     setStatus('Disconnected');
+                    // Dropped before it ever came up, with no error to explain
+                    // it: the tunnel closed on us.
+                    if (!wasConnected.current && !failed.current) {
+                        failed.current = true;
+                        onErrorRef.current?.('the session closed before it opened');
+                    }
                     onDisconnect();
                     break;
             }

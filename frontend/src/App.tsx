@@ -11,6 +11,9 @@ interface EC2Instance {
     id: string;
     name: string;
     state: string;
+    // Why AWS put it in that state — see the backend's /api/instances.
+    stateReasonCode?: string;
+    stateReasonMessage?: string;
     publicIp?: string;
     privateIp?: string;
     // User-set overrides (see backend ec2_settings)
@@ -60,36 +63,92 @@ const MOUNT_PATH = window.location.pathname.replace(/[^/]*$/, '');
 const API_BASE = import.meta.env.VITE_API_URL || `${MOUNT_PATH}api`;
 
 // How often to re-poll AWS while an instance is mid-transition, and how long a
-// start/stop request may sit unacknowledged before we release the button rather
-// than spin forever (a boot or shutdown normally reports back well inside this).
+// start/stop may drag on before we give up on it and say so (a boot or shutdown
+// normally reports back well inside this).
 const TRANSITION_POLL_MS = 3000;
 const TRANSITION_TIMEOUT_MS = 5 * 60 * 1000;
 
-// Drops in-flight start/stop requests once AWS reports the instance has left
-// `from` (or it disappeared from the list entirely). From that point the
-// 'pending'/'stopping' state itself keeps the spinner going, so the button
-// never flips back to Start/Stop in the middle of a transition. Returns the
-// original object when nothing changed, to avoid pointless re-renders.
-const pruneRequests = (
-    requests: Record<string, boolean>,
-    stateById: Map<string, string>,
-    from: string
-) => {
-    const ids = Object.keys(requests);
-    const kept = ids.filter(id => stateById.get(id) === from);
-    if (kept.length === ids.length) return requests;
-    return Object.fromEntries(kept.map(id => [id, true]));
+// guacd going down drops every open session at once; they'd otherwise each
+// raise the same notice.
+const GUACD_TOAST_DEDUPE_MS = 10000;
+
+// API errors come back as `{ error }`; fall back to the raw body for anything
+// that isn't JSON (a proxy error page, say).
+const readErrorMessage = async (res: Response) => {
+    const body = (await res.text()).trim();
+    try {
+        return JSON.parse(body).error || body;
+    } catch {
+        return body || `HTTP ${res.status}`;
+    }
 };
 
-const clearRequests = (
-    setRequests: React.Dispatch<React.SetStateAction<Record<string, boolean>>>,
-    instanceIds: string[]
-) => setRequests(prev => {
-    if (!instanceIds.some(id => prev[id])) return prev;
-    const next = { ...prev };
+// A start/stop we've asked AWS for and are still waiting to see happen.
+interface TransitionRequest {
+    requestedAt: number;
+    // The StateReason code the instance carried when we sent the request. AWS
+    // reports a failed start (capacity, internal error) as the instance simply
+    // arriving back at 'stopped' — the *new* reason code is the only signal that
+    // this attempt is the thing that failed, rather than one still in flight.
+    baselineReason: string;
+}
+
+type TransitionRequests = Record<string, TransitionRequest>;
+
+const beginRequests = (instanceIds: string[], instances: EC2Instance[]): TransitionRequests => {
+    const now = Date.now();
+    return Object.fromEntries(instanceIds.map(id => [id, {
+        requestedAt: now,
+        baselineReason: instances.find(i => i.id === id)?.stateReasonCode || ''
+    }]));
+};
+
+const dropRequests = (requests: TransitionRequests, instanceIds: string[]) => {
+    if (!instanceIds.some(id => requests[id])) return requests;
+    const next = { ...requests };
     instanceIds.forEach(id => delete next[id]);
     return next;
-});
+};
+
+// Settles outstanding requests against what AWS now reports. A request lives
+// until the instance reaches `target` (done), comes to rest back at `source`
+// with a new reason (failed), or runs out of time — while it lives, the button
+// stays a spinner rather than flipping back to Start/Stop mid-transition.
+// Returns `requests` itself when nothing changed, to avoid pointless re-renders.
+const reconcileRequests = (
+    requests: TransitionRequests,
+    byId: Map<string, EC2Instance>,
+    source: string,
+    target: string
+) => {
+    const now = Date.now();
+    const next: TransitionRequests = {};
+    const failures: { id: string; message: string }[] = [];
+
+    for (const [id, req] of Object.entries(requests)) {
+        const inst = byId.get(id);
+        // Gone (terminated) or arrived: nothing left to wait on.
+        if (!inst || inst.state === target) continue;
+
+        if (inst.state === source && inst.stateReasonCode !== req.baselineReason) {
+            failures.push({ id, message: inst.stateReasonMessage || inst.stateReasonCode || 'AWS gave no reason' });
+            continue;
+        }
+        if (now - req.requestedAt > TRANSITION_TIMEOUT_MS) {
+            failures.push({
+                id,
+                message: inst.state === source
+                    ? "AWS hasn't acted on the request"
+                    : `still '${inst.state}' after ${Math.round(TRANSITION_TIMEOUT_MS / 60000)} minutes`
+            });
+            continue;
+        }
+        next[id] = req;
+    }
+
+    const unchanged = !failures.length && Object.keys(next).length === Object.keys(requests).length;
+    return { next: unchanged ? requests : next, failures };
+};
 
 function App() {
     const [instances, setInstances] = useState<EC2Instance[]>([]);
@@ -125,8 +184,15 @@ function App() {
 
     // Per-instance loading states
     const [connecting, setConnecting] = useState<Record<string, boolean>>({});
-    const [starting, setStarting] = useState<Record<string, boolean>>({});
-    const [stopping, setStopping] = useState<Record<string, boolean>>({});
+    const [starting, setStarting] = useState<TransitionRequests>({});
+    const [stopping, setStopping] = useState<TransitionRequests>({});
+    // Mirrors of the two above, so the transition poller (whose interval closure
+    // is fixed at the render that started it) always reconciles against the
+    // current requests, and so overlapping fetches can't report a failure twice.
+    const startingRef = useRef(starting);
+    const stoppingRef = useRef(stopping);
+    useEffect(() => { startingRef.current = starting; }, [starting]);
+    useEffect(() => { stoppingRef.current = stopping; }, [stopping]);
 
     const [hasRestored, setHasRestored] = useState(false);
 
@@ -267,6 +333,32 @@ function App() {
         }
     };
 
+    // Settles outstanding start/stop requests against a fresh instance list, and
+    // reports the ones that didn't get where they were going. The refs are
+    // updated up front so a second fetch landing mid-update can't re-toast a
+    // failure this one already reported.
+    const settleTransitions = useCallback((data: EC2Instance[]) => {
+        const byId = new Map(data.map(i => [i.id, i]));
+        const nameOf = (id: string) => {
+            const inst = byId.get(id);
+            return inst ? (inst.label || inst.name) : id;
+        };
+
+        const started = reconcileRequests(startingRef.current, byId, 'stopped', 'running');
+        if (started.next !== startingRef.current) {
+            startingRef.current = started.next;
+            setStarting(started.next);
+        }
+        const stopped = reconcileRequests(stoppingRef.current, byId, 'running', 'stopped');
+        if (stopped.next !== stoppingRef.current) {
+            stoppingRef.current = stopped.next;
+            setStopping(stopped.next);
+        }
+
+        started.failures.forEach(f => pushToast(`Failed to start ${nameOf(f.id)}: ${f.message}`, 'error'));
+        stopped.failures.forEach(f => pushToast(`Failed to stop ${nameOf(f.id)}: ${f.message}`, 'error'));
+    }, [pushToast]);
+
     // `silent` is used by the transition poller below, which runs on a timer and
     // shouldn't spin the toolbar refresh icon or surface transient errors.
     const fetchInstances = async (silent = false) => {
@@ -276,13 +368,10 @@ function App() {
         }
         try {
             const res = await fetch(`${API_BASE}/instances`);
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) throw new Error(await readErrorMessage(res));
             const data: EC2Instance[] = await res.json();
             setInstances(data);
-            // Reconcile the requests we're still waiting on against reality.
-            const stateById = new Map(data.map(i => [i.id, i.state]));
-            setStarting(prev => pruneRequests(prev, stateById, 'stopped'));
-            setStopping(prev => pruneRequests(prev, stateById, 'running'));
+            settleTransitions(data);
         } catch (err: any) {
             if (!silent) setError(err.message);
         } finally {
@@ -313,7 +402,7 @@ function App() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
             });
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) throw new Error(await readErrorMessage(res));
             const data = await res.json();
 
             setActiveSessions(prev => ({
@@ -413,6 +502,28 @@ function App() {
         });
     };
 
+    // A failed session says almost nothing useful on its own — the pane just
+    // disappears. guacd (the daemon doing the actual RDP) being down looks
+    // exactly like the remote refusing us, so ask the backend which it was.
+    const guacdReportedAt = useRef(0);
+    const reportSessionError = useCallback(async (instanceId: string, message: string) => {
+        const label = activeSessions[instanceId]?.name || instanceId;
+        try {
+            const res = await fetch(`${API_BASE}/guacd`);
+            const guacd = await res.json();
+            if (!guacd.reachable) {
+                // One notice covers every session that just dropped for it.
+                if (Date.now() - guacdReportedAt.current < GUACD_TOAST_DEDUPE_MS) return;
+                guacdReportedAt.current = Date.now();
+                pushToast(guacd.error || 'guacd is unreachable — check that the guacd service is running.', 'error');
+                return;
+            }
+        } catch {
+            // The backend itself is unreachable; fall through to the raw reason.
+        }
+        pushToast(`${label} session ended: ${message}`, 'error');
+    }, [activeSessions, pushToast]);
+
     const disconnectInstance = useCallback((instanceId: string) => {
         setActiveSessions(prev => {
             const newSessions = { ...prev };
@@ -458,12 +569,11 @@ function App() {
     };
 
     // Start/stop only *request* a transition — AWS takes a while to actually get
-    // there. So the spinner stays up past the API response and is only released
-    // once the instance reports the new state (see the poller below), with a
-    // watchdog so a request AWS never acts on doesn't spin forever.
+    // there. So the spinner stays up past the API response, and the request is
+    // only settled once polling sees the instance arrive (or fail to).
     const startInstances = async (instanceIds: string[]) => {
         if (!instanceIds.length) return;
-        setStarting(prev => ({ ...prev, ...Object.fromEntries(instanceIds.map(id => [id, true])) }));
+        setStarting(prev => ({ ...prev, ...beginRequests(instanceIds, instances) }));
 
         try {
             const res = await fetch(`${API_BASE}/instances/start`, {
@@ -471,18 +581,17 @@ function App() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ instanceIds })
             });
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) throw new Error(await readErrorMessage(res));
             fetchInstances(true);
-            setTimeout(() => clearRequests(setStarting, instanceIds), TRANSITION_TIMEOUT_MS);
         } catch (err: any) {
             pushToast(`Failed to start: ${err.message}`, 'error');
-            clearRequests(setStarting, instanceIds);
+            setStarting(prev => dropRequests(prev, instanceIds));
         }
     };
 
     const stopInstances = async (instanceIds: string[]) => {
         if (!instanceIds.length) return;
-        setStopping(prev => ({ ...prev, ...Object.fromEntries(instanceIds.map(id => [id, true])) }));
+        setStopping(prev => ({ ...prev, ...beginRequests(instanceIds, instances) }));
 
         try {
             const res = await fetch(`${API_BASE}/instances/stop`, {
@@ -490,12 +599,11 @@ function App() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ instanceIds })
             });
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) throw new Error(await readErrorMessage(res));
             fetchInstances(true);
-            setTimeout(() => clearRequests(setStopping, instanceIds), TRANSITION_TIMEOUT_MS);
         } catch (err: any) {
             pushToast(`Failed to stop: ${err.message}`, 'error');
-            clearRequests(setStopping, instanceIds);
+            setStopping(prev => dropRequests(prev, instanceIds));
         }
     };
 
@@ -815,6 +923,7 @@ function App() {
                                         clipboard={sharedClipboard}
                                         onClipboard={publishClipboard}
                                         onDisconnect={() => disconnectInstance(session.instanceId)}
+                                        onError={(message) => reportSessionError(session.instanceId, message)}
                                         onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
                                         onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
                                     />

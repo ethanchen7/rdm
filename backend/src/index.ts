@@ -2,6 +2,7 @@
 import express from 'express';
 import http from 'http';
 import https from 'https';
+import net from 'net';
 import fs from 'fs';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -81,6 +82,13 @@ app.get('/api/instances', async (req, res) => {
                     username: ov?.username || '',
                     hasPassword: ov?.hasPassword || false,
                     state: instance.State?.Name,
+                    // Why the instance is in that state (e.g.
+                    // 'Server.InsufficientInstanceCapacity',
+                    // 'Client.UserInitiatedShutdown'). AWS keeps the previous
+                    // reason until the state actually changes, which is what
+                    // lets the UI tell a failed start from one still in flight.
+                    stateReasonCode: instance.StateReason?.Code || '',
+                    stateReasonMessage: instance.StateReason?.Message || '',
                     privateIp: instance.PrivateIpAddress,
                     publicIp: instance.PublicIpAddress
                 });
@@ -147,10 +155,48 @@ const guacOptions = {
     }
 };
 
+// guacd is the Guacamole proxy daemon that does the actual RDP; this service
+// only brokers tokens and WebSockets. If it isn't running, the WebSocket opens
+// and then dies without ever explaining itself, so it gets probed directly (see
+// probeGuacd) and reported as its own error.
+const GUACD_HOST = process.env.GUACD_HOST || '127.0.0.1';
+const GUACD_PORT = Number(process.env.GUACD_PORT) || 4822;
+const GUACD_PROBE_TIMEOUT_MS = 2000;
+
 const guacClientOptions = {
-    host: '127.0.0.1', // guacd host
-    port: 4822 // guacd port
+    host: GUACD_HOST,
+    port: GUACD_PORT
 };
+
+// Opens and immediately drops a TCP connection to guacd. Enough to tell "not
+// running / not reachable" from "running but the RDP target is refusing us",
+// which are otherwise indistinguishable once the tunnel has been handed off.
+const probeGuacd = () => new Promise<{ reachable: boolean; error?: string }>(resolve => {
+    const socket = net.createConnection({ host: GUACD_HOST, port: GUACD_PORT });
+    const settle = (result: { reachable: boolean; error?: string }) => {
+        socket.destroy();
+        resolve(result);
+    };
+    socket.setTimeout(GUACD_PROBE_TIMEOUT_MS);
+    socket.once('connect', () => settle({ reachable: true }));
+    socket.once('timeout', () => settle({ reachable: false, error: `no response within ${GUACD_PROBE_TIMEOUT_MS}ms` }));
+    socket.once('error', (err: NodeJS.ErrnoException) => settle({ reachable: false, error: err.code || err.message }));
+});
+
+const guacdUnreachableMessage = (error?: string) =>
+    `guacd is unreachable at ${GUACD_HOST}:${GUACD_PORT}${error ? ` (${error})` : ''} — check that the guacd service is running.`;
+
+// Polled by the frontend when a session dies, to say whether guacd was the
+// reason rather than the remote desktop itself.
+app.get('/api/guacd', async (req, res) => {
+    const probe = await probeGuacd();
+    res.json({
+        reachable: probe.reachable,
+        host: GUACD_HOST,
+        port: GUACD_PORT,
+        error: probe.reachable ? undefined : guacdUnreachableMessage(probe.error)
+    });
+});
 
 // Constructing GuacamoleLite attaches the WebSocket handler to `server`; we
 // don't need the returned instance (tokens are encrypted directly below).
@@ -213,8 +259,15 @@ app.put('/api/ec2-settings/:id', async (req, res) => {
 
 app.post('/api/connect', async (req, res) => {
     try {
+        // Checked before any of the work below, so a stopped guacd is reported as
+        // itself instead of as a session that opens and instantly vanishes.
+        const probe = await probeGuacd();
+        if (!probe.reachable) {
+            return res.status(503).json({ error: guacdUnreachableMessage(probe.error) });
+        }
+
         const { instanceId, customId, settings = {} } = req.body;
-        
+
         let rdpHostname = '';
         let rdpPort = 3389;
         let dynamicPassword = '';
