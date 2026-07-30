@@ -85,6 +85,15 @@ const TRANSITION_TIMEOUT_MS = 5 * 60 * 1000;
 // raise the same notice.
 const GUACD_TOAST_DEDUPE_MS = 10000;
 
+// A session always dies partway through its machine's shutdown, and guacd
+// describes that in alarming terms ("Connection failed (server unreachable?)")
+// even though it's exactly what was asked for. So a session error on an
+// instance we're stopping is held this long: if the instance reaches 'stopped',
+// it's dropped; if the shutdown is instead stuck, the held reason is reported.
+const SHUTDOWN_GRACE_MS = 60000;
+const STOPPED_STATES = ['stopped', 'terminated'];
+const SHUTTING_DOWN_STATES = ['stopping', 'shutting-down'];
+
 // API errors come back as `{ error }`; fall back to the raw body for anything
 // that isn't JSON (a proxy error page, say).
 const readErrorMessage = async (res: Response) => {
@@ -206,6 +215,10 @@ function App() {
     const stoppingRef = useRef(stopping);
     useEffect(() => { startingRef.current = starting; }, [starting]);
     useEffect(() => { stoppingRef.current = stopping; }, [stopping]);
+    // Same reason, for the deferred session-error timers: they fire a minute
+    // after the fact and need the instance list as it is then, not as it was.
+    const instancesRef = useRef(instances);
+    useEffect(() => { instancesRef.current = instances; }, [instances]);
 
     const [hasRestored, setHasRestored] = useState(false);
 
@@ -450,6 +463,10 @@ function App() {
 
     const connectInstance = async (instanceId: string) => {
         if (activeSessions[instanceId] || connecting[instanceId]) return;
+        // A fresh attempt supersedes any reason still held from the last one, so
+        // reconnecting a restarted instance doesn't surface a stale notice.
+        clearTimeout(shutdownGrace.current[instanceId]);
+        delete shutdownGrace.current[instanceId];
 
         setConnecting(prev => ({ ...prev, [instanceId]: true }));
         try {
@@ -575,8 +592,45 @@ function App() {
     // disappears. guacd (the daemon doing the actual RDP) being down looks
     // exactly like the remote refusing us, so ask the backend which it was.
     const guacdReportedAt = useRef(0);
+
+    // Instance ids are unreadable in a notice, and by the time a deferred one
+    // fires the session (which carries the display name) is long gone.
+    const labelFor = (instanceId: string) => {
+        const inst = instancesRef.current.find(i => i.id === instanceId);
+        return activeSessions[instanceId]?.name || inst?.label || inst?.name
+            || customInstances.find(c => c.id === instanceId)?.name || instanceId;
+    };
+
+    const stateOf = (instanceId: string) => instancesRef.current.find(i => i.id === instanceId)?.state || '';
+    const isShuttingDown = (instanceId: string) =>
+        !!stoppingRef.current[instanceId] || SHUTTING_DOWN_STATES.includes(stateOf(instanceId));
+
+    // Session errors raised mid-shutdown, waiting to see whether the instance
+    // actually gets there. Keyed by instance so a reconnect-and-fail-again
+    // replaces its predecessor rather than queueing a second notice.
+    const shutdownGrace = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+    useEffect(() => () => Object.values(shutdownGrace.current).forEach(clearTimeout), []);
+
+    const deferSessionError = (instanceId: string, message: string) => {
+        clearTimeout(shutdownGrace.current[instanceId]);
+        const label = labelFor(instanceId);
+        shutdownGrace.current[instanceId] = setTimeout(() => {
+            delete shutdownGrace.current[instanceId];
+            // Shut down as asked — the dropped session was just the shutdown
+            // happening, so there's nothing to report.
+            if (STOPPED_STATES.includes(stateOf(instanceId))) return;
+            // Still not down a minute on: the reason it gave is worth seeing.
+            pushToast(`${label} session ended: ${message}`, 'error');
+        }, SHUTDOWN_GRACE_MS);
+    };
+
     const reportSessionError = useCallback(async (instanceId: string, message: string) => {
-        const label = activeSessions[instanceId]?.name || instanceId;
+        // The machine is already gone; a dead session is a consequence, not news.
+        if (STOPPED_STATES.includes(stateOf(instanceId))) return;
+        // On its way down (a stop we sent, or one made in the console or from
+        // inside Windows) — hold the reason until we know it landed.
+        if (isShuttingDown(instanceId)) return deferSessionError(instanceId, message);
+        const label = labelFor(instanceId);
         try {
             const res = await fetch(`${API_BASE}/guacd`);
             const guacd = await res.json();
@@ -590,8 +644,10 @@ function App() {
         } catch {
             // The backend itself is unreachable; fall through to the raw reason.
         }
+        // A stop may have been requested while we were asking about guacd.
+        if (isShuttingDown(instanceId)) return deferSessionError(instanceId, message);
         pushToast(`${label} session ended: ${message}`, 'error');
-    }, [activeSessions, pushToast]);
+    }, [activeSessions, customInstances, pushToast]);
 
     const disconnectInstance = useCallback((instanceId: string) => {
         setActiveSessions(prev => {
