@@ -172,6 +172,12 @@ const API_BASE = import.meta.env.VITE_API_URL || `${MOUNT_PATH}api`;
 const TRANSITION_POLL_MS = 3000;
 const TRANSITION_TIMEOUT_MS = 5 * 60 * 1000;
 
+// EC2's API is eventually consistent: a DescribeInstances issued straight after
+// a resize routinely still reports the old instance type. Long enough to outlast
+// that, short enough to give up rather than poll forever.
+const TYPE_CONSISTENCY_POLL_MS = 1500;
+const TYPE_CONSISTENCY_TIMEOUT_MS = 20000;
+
 // guacd going down drops every open session at once; they'd otherwise each
 // raise the same notice.
 const GUACD_TOAST_DEDUPE_MS = 10000;
@@ -745,6 +751,32 @@ function App() {
     const sortByColumn = (key: TypeSortKey) =>
         setTypeSort(prev => prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' });
 
+    // Keeps refetching until AWS reports the type we just set. Without this the
+    // optimistic value below gets stamped back to the old one by the first stale
+    // read, and the modal sits on the previous type until something else happens
+    // to refetch — which is exactly what a plain refetch-after-change does.
+    const confirmTypeChange = useCallback(async (instanceId: string, instanceType: string) => {
+        const deadline = Date.now() + TYPE_CONSISTENCY_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, TYPE_CONSISTENCY_POLL_MS));
+            try {
+                const res = await fetch(`${API_BASE}/instances`);
+                if (!res.ok) continue;
+                const data: EC2Instance[] = await res.json();
+                const reported = data.find(i => i.id === instanceId)?.instanceType;
+                // Agreed, or the instance is gone entirely — either way there's
+                // nothing left to wait for.
+                if (reported === undefined || reported === instanceType) {
+                    setInstances(data);
+                    settleTransitions(data);
+                    return;
+                }
+            } catch {
+                // Keep trying; the optimistic value stands in the meantime.
+            }
+        }
+    }, [settleTransitions]);
+
     const changeInstanceType = async (instanceId: string, instanceType: string) => {
         setChangingType(true);
         try {
@@ -754,9 +786,13 @@ function App() {
                 body: JSON.stringify({ instanceType })
             });
             if (!res.ok) throw new Error(await readErrorMessage(res));
-            await fetchInstances();
+            // AWS accepted it, so show it straight away rather than waiting for
+            // a describe to catch up (see confirmTypeChange).
+            setInstances(prev => prev.map(i => i.id === instanceId ? { ...i, instanceType } : i));
             pushToast(`Instance type changed to ${instanceType}`, 'success');
             setTypeModal(null);
+            // Reconciles in the background — nothing is waiting on it.
+            confirmTypeChange(instanceId, instanceType);
         } catch (err: any) {
             pushToast(`Couldn't change instance type: ${err.message}`, 'error');
         } finally {
