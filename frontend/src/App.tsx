@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Grid, LayoutGrid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check } from 'lucide-react';
+import { Grid, LayoutGrid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check, Cpu } from 'lucide-react';
 import { GuacamoleClient } from './GuacamoleClient';
 import { useDeviceClipboard } from './deviceClipboard';
 import './index.css';
@@ -11,6 +11,15 @@ interface EC2Instance {
     id: string;
     name: string;
     state: string;
+    // Hardware size, e.g. 'c5a.xlarge'.
+    instanceType?: string;
+    // A resize is constrained by both: the new type must support the same
+    // architecture ('x86_64' / 'arm64') and be offered in this AZ.
+    architecture?: string;
+    az?: string;
+    // The AMI's OS ('Windows', 'Linux/UNIX', …) — on-demand rates are per OS,
+    // so this decides which price list the picker quotes.
+    platformDetails?: string;
     // Why AWS put it in that state — see the backend's /api/instances.
     stateReasonCode?: string;
     stateReasonMessage?: string;
@@ -21,6 +30,88 @@ interface EC2Instance {
     username?: string;
     hasPassword?: boolean;
 }
+
+// One entry of the region's instance-type catalogue (backend /api/instance-types).
+interface InstanceTypeSpec {
+    name: string;
+    vcpus?: number;
+    memoryMib?: number;
+    network?: string;
+    // Numeric form of `network` — AWS states it as prose, which won't sort.
+    networkGbps: number;
+    clockSpeedGhz?: number;
+    architectures: string[];
+    currentGeneration: boolean;
+    burstable: boolean;
+    storage: string;
+    gpu?: string;
+    // On-demand USD/hour, absent when pricing couldn't be read.
+    hourly?: number;
+}
+
+// Whether the cost columns could be filled in, and what they're quoting.
+interface PricingMeta {
+    available: boolean;
+    os?: string;
+    region?: string;
+    error?: string;
+}
+
+interface InstanceTypeResponse {
+    types: InstanceTypeSpec[];
+    pricing: PricingMeta;
+}
+
+// Everything an instance needs to identify its catalogue. Instances agreeing on
+// all three share one — which is what makes the cache worth having.
+const catalogueKeyFor = (inst: EC2Instance) =>
+    `${inst.architecture || ''}|${inst.az || ''}|${inst.platformDetails || ''}`;
+
+// Columns the type table can be ordered by. 'name' orders by family then size
+// (the natural reading of an instance type), not raw alphabetical.
+type TypeSortKey = 'name' | 'vcpus' | 'memoryMib' | 'networkGbps' | 'hourly';
+interface TypeSort { key: TypeSortKey; dir: 'asc' | 'desc' }
+
+const familyOf = (name: string) => name.split('.')[0] || name;
+
+// 'c5a.2xlarge' after 'c5a.xlarge' — plain alphabetical would put every
+// multi-digit size first ('12xlarge' before '2xlarge').
+const compareNatural = (a: InstanceTypeSpec, b: InstanceTypeSpec) => {
+    const fa = familyOf(a.name);
+    const fb = familyOf(b.name);
+    if (fa !== fb) return fa.localeCompare(fb);
+    if ((a.vcpus ?? 0) !== (b.vcpus ?? 0)) return (a.vcpus ?? 0) - (b.vcpus ?? 0);
+    if ((a.memoryMib ?? 0) !== (b.memoryMib ?? 0)) return (a.memoryMib ?? 0) - (b.memoryMib ?? 0);
+    return a.name.localeCompare(b.name);
+};
+
+const sortSpecs = (specs: InstanceTypeSpec[], { key, dir }: TypeSort) => {
+    const factor = dir === 'asc' ? 1 : -1;
+    return [...specs].sort((a, b) => {
+        if (key === 'name') return compareNatural(a, b) * factor;
+        const av = a[key];
+        const bv = b[key];
+        // A type with no figure (an unpriced one, say) is noise either way up,
+        // so it sits at the bottom in both directions.
+        if (av === undefined && bv === undefined) return compareNatural(a, b);
+        if (av === undefined) return 1;
+        if (bv === undefined) return -1;
+        if (av !== bv) return (av - bv) * factor;
+        return compareNatural(a, b);
+    });
+};
+
+const formatUsd = (amount: number | undefined, digits: number) =>
+    amount === undefined
+        ? '—'
+        : `$${amount.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+
+// Sort indicator in a column header — the direction when that column is the
+// active one, a dimmed hint that the column *can* be sorted otherwise.
+const SortArrow = ({ active, dir }: { active: boolean; dir: 'asc' | 'desc' }) =>
+    active
+        ? (dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)
+        : <ArrowUpDown size={11} className="opacity-30" />;
 
 interface ActiveSession {
     instanceId: string;
@@ -103,6 +194,14 @@ const readErrorMessage = async (res: Response) => {
     } catch {
         return body || `HTTP ${res.status}`;
     }
+};
+
+// AWS reports memory in MiB; GiB is how instance types are actually talked
+// about. Halves show up in the smaller sizes (t3.micro is 1 GiB, t3.small 2).
+const formatMemory = (mib?: number) => {
+    if (mib === undefined) return '—';
+    const gib = mib / 1024;
+    return `${gib < 1 ? gib.toFixed(2).replace(/0+$/, '') : gib % 1 ? gib.toFixed(1) : gib} GiB`;
 };
 
 // A start/stop we've asked AWS for and are still waiting to see happen.
@@ -231,6 +330,31 @@ function App() {
 
     // Reusable confirmation dialog (used for every stop action).
     const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+
+    // Instance-type picker, opened from the EC2 settings modal. The catalogue is
+    // ~hundreds of entries per architecture and never changes, so it's fetched
+    // once per architecture and kept for the session.
+    const [typeModal, setTypeModal] = useState<{ instanceId: string } | null>(null);
+    const [instanceTypes, setInstanceTypes] = useState<InstanceTypeSpec[] | null>(null);
+    const [pricingMeta, setPricingMeta] = useState<PricingMeta | null>(null);
+    const [typesError, setTypesError] = useState('');
+    const [typeSearch, setTypeSearch] = useState('');
+    const [typeSelection, setTypeSelection] = useState('');
+    const [currentGenOnly, setCurrentGenOnly] = useState(true);
+    // Exact-match spec filters; '' means "any". Their options come from the
+    // catalogue itself, so they only ever offer values that exist.
+    const [typeFilters, setTypeFilters] = useState({ vcpus: '', memoryMib: '', network: '' });
+    const [changingType, setChangingType] = useState(false);
+    const [typeSort, setTypeSort] = useState<TypeSort>({ key: 'name', dir: 'asc' });
+    // Catalogues are keyed by architecture + AZ + platform — every instance
+    // sharing those three sees the same list, so one fetch serves all of them.
+    // Resolved values are kept for an instant open; the in-flight promises are
+    // kept alongside so a prefetch and an open can't duplicate the same request.
+    const typeCache = useRef<Record<string, InstanceTypeResponse>>({});
+    const typeRequests = useRef<Record<string, Promise<InstanceTypeResponse>>>({});
+    // The catalogue the open modal is waiting on, so a slow fetch can't land on
+    // a modal that's since been reopened for a different instance.
+    const typeRequest = useRef('');
 
     // Drag-to-reorder state for the grid.
     const [dragId, setDragId] = useState<string | null>(null);
@@ -533,6 +657,111 @@ function App() {
             password: '', changePassword: false, hasPassword: !!inst.hasPassword
         });
         setInstanceModal({ mode: 'edit-ec2', id: inst.id });
+    };
+
+    // Fetches a catalogue once and hands the same promise to every later caller,
+    // so a prefetch already running is what an open waits on rather than firing
+    // a second identical request.
+    const loadInstanceTypes = useCallback((key: string) => {
+        let pending = typeRequests.current[key];
+        if (!pending) {
+            const [arch = '', az = '', platform = ''] = key.split('|');
+            pending = (async () => {
+                const query = new URLSearchParams({ arch, az, platform });
+                const res = await fetch(`${API_BASE}/instance-types?${query}`);
+                if (!res.ok) throw new Error(await readErrorMessage(res));
+                const data: InstanceTypeResponse = await res.json();
+                typeCache.current[key] = data;
+                return data;
+            })();
+            typeRequests.current[key] = pending;
+            // A failure shouldn't be remembered as the answer — let the next
+            // attempt try again.
+            pending.catch(() => { delete typeRequests.current[key]; });
+        }
+        return pending;
+    }, []);
+
+    // Warm every catalogue the visible instances need, in the background, so the
+    // picker opens instantly whichever instance it's opened from. Keyed off the
+    // set of distinct catalogues rather than the instance list itself, so the
+    // transition poller re-running doesn't re-trigger this.
+    const catalogueKeys = instances.map(catalogueKeyFor).filter(k => k !== '||');
+    const catalogueSignature = [...new Set(catalogueKeys)].sort().join(',');
+    useEffect(() => {
+        if (!catalogueSignature) return;
+        let cancelled = false;
+        (async () => {
+            // Sequentially: these are several paginated AWS sweeps each, and
+            // nothing is waiting on them.
+            for (const key of catalogueSignature.split(',')) {
+                if (cancelled) return;
+                if (typeCache.current[key]) continue;
+                // A failure here is silent by design — the picker surfaces it
+                // properly if and when it's actually opened.
+                await loadInstanceTypes(key).catch(() => {});
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [catalogueSignature, loadInstanceTypes]);
+
+    // Open the instance-type picker for an EC2 instance.
+    const openTypeModal = async (inst: EC2Instance) => {
+        setTypeModal({ instanceId: inst.id });
+        setTypeSelection(inst.instanceType || '');
+        setTypeSearch('');
+        // Filters from a previous instance would otherwise carry over and hide
+        // everything for a machine whose catalogue doesn't have those values.
+        setTypeFilters({ vcpus: '', memoryMib: '', network: '' });
+        setTypesError('');
+
+        const key = catalogueKeyFor(inst);
+        typeRequest.current = key;
+
+        // Already warmed — show it without a loading pass.
+        const cached = typeCache.current[key];
+        if (cached) {
+            setInstanceTypes(cached.types);
+            setPricingMeta(cached.pricing);
+            return;
+        }
+
+        setInstanceTypes(null);
+        setPricingMeta(null);
+        try {
+            const data = await loadInstanceTypes(key);
+            // Reopened on a different instance while this was in flight — its
+            // catalogue is cached above, it just isn't what's on screen now.
+            if (typeRequest.current !== key) return;
+            setInstanceTypes(data.types);
+            setPricingMeta(data.pricing);
+        } catch (err: any) {
+            if (typeRequest.current !== key) return;
+            setTypesError(err.message || 'Failed to load instance types');
+        }
+    };
+
+    // Clicking a column header sorts by it; clicking the active one reverses.
+    const sortByColumn = (key: TypeSortKey) =>
+        setTypeSort(prev => prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' });
+
+    const changeInstanceType = async (instanceId: string, instanceType: string) => {
+        setChangingType(true);
+        try {
+            const res = await fetch(`${API_BASE}/instances/${instanceId}/type`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ instanceType })
+            });
+            if (!res.ok) throw new Error(await readErrorMessage(res));
+            await fetchInstances();
+            pushToast(`Instance type changed to ${instanceType}`, 'success');
+            setTypeModal(null);
+        } catch (err: any) {
+            pushToast(`Couldn't change instance type: ${err.message}`, 'error');
+        } finally {
+            setChangingType(false);
+        }
     };
 
     const handleSaveInstance = async (e: React.FormEvent) => {
@@ -1065,6 +1294,12 @@ function App() {
                 const isEc2 = instanceModal.mode === 'edit-ec2';
                 const isAdd = instanceModal.mode === 'add';
                 const title = isAdd ? 'Add Custom RDP' : isEc2 ? 'EC2 Instance Settings' : 'Instance Settings';
+                // Read live rather than from the form: the type is changed
+                // through its own modal (an AWS-side action), not saved with the
+                // local overrides below.
+                const ec2Inst = instanceModal.mode === 'edit-ec2'
+                    ? instances.find(i => i.id === instanceModal.id)
+                    : undefined;
                 return (
                 <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
                     <form onSubmit={handleSaveInstance} className="bg-slate-900 border border-slate-700 p-6 rounded-lg shadow-2xl w-full max-w-sm">
@@ -1090,6 +1325,26 @@ function App() {
                                 />
                                 {isEc2 && <p className="text-xs text-slate-500 mt-1">Managed by AWS — updates automatically.</p>}
                             </div>
+                            {ec2Inst && (
+                                <div>
+                                    <label className="block text-xs text-slate-400 mb-1">Instance Type</label>
+                                    <button
+                                        type="button"
+                                        onClick={() => openTypeModal(ec2Inst)}
+                                        className="w-full bg-slate-950 border border-slate-700 rounded p-2 flex items-center justify-between hover:border-blue-500 transition-colors group/type"
+                                    >
+                                        <span className="font-mono text-white">{ec2Inst.instanceType || '—'}</span>
+                                        <span className="text-xs text-slate-500 group-hover/type:text-blue-400 flex items-center gap-1">
+                                            <Cpu size={13} /> Change
+                                        </span>
+                                    </button>
+                                    <p className="text-xs text-slate-500 mt-1">
+                                        {ec2Inst.state === 'stopped'
+                                            ? 'Click to view specs and resize the machine.'
+                                            : 'Click to view specs — resizing requires the instance to be stopped.'}
+                                    </p>
+                                </div>
+                            )}
                             <div>
                                 <label className="block text-xs text-slate-400 mb-1">Username</label>
                                 <input required type="text" className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white outline-none focus:border-blue-500" value={instanceForm.username} onChange={e => setInstanceForm({...instanceForm, username: e.target.value})} />
@@ -1124,6 +1379,275 @@ function App() {
                             <button type="submit" className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded">{isAdd ? 'Add Connection' : 'Save'}</button>
                         </div>
                     </form>
+                </div>
+                );
+            })()}
+
+            {/* Instance Type Picker — opened from the EC2 settings modal, so it
+                sits above it. Resizing is an AWS-side change applied on its own,
+                not part of saving the local overrides underneath. */}
+            {typeModal && (() => {
+                // Read from the live list so a stop made while this is open
+                // clears the "must be stopped" notice on its own.
+                const inst = instances.find(i => i.id === typeModal.instanceId);
+                const current = inst?.instanceType || '';
+                const canResize = inst?.state === 'stopped';
+                const all = instanceTypes || [];
+                const currentSpec = all.find(t => t.name === current);
+                const q = typeSearch.trim().toLowerCase();
+                // The current type always stays in view, even if it's an older
+                // generation that the filter would otherwise hide.
+                const inGeneration = all.filter(t => !currentGenOnly || t.currentGeneration || t.name === current);
+
+                // Dropdown options come from the catalogue in view, so every
+                // choice offered leads somewhere — no empty results from picking
+                // a size this architecture doesn't have.
+                const vcpuOptions = [...new Set(inGeneration.map(t => t.vcpus))]
+                    .filter((v): v is number => v !== undefined).sort((a, b) => a - b);
+                const memoryOptions = [...new Set(inGeneration.map(t => t.memoryMib))]
+                    .filter((v): v is number => v !== undefined).sort((a, b) => a - b);
+                // Ordered by throughput rather than alphabetically, so the list
+                // reads 'Low' → '100 Gigabit' instead of scattering the figures.
+                const networkOptions = [...new Map(
+                    inGeneration.filter(t => t.network).map(t => [t.network as string, t.networkGbps])
+                )].sort((a, b) => a[1] - b[1]).map(([label]) => label);
+
+                const filtersActive = !!(typeFilters.vcpus || typeFilters.memoryMib || typeFilters.network);
+                const matches = inGeneration.filter(t =>
+                    (!q || t.name.toLowerCase().includes(q))
+                    && (!typeFilters.vcpus || t.vcpus === Number(typeFilters.vcpus))
+                    && (!typeFilters.memoryMib || t.memoryMib === Number(typeFilters.memoryMib))
+                    && (!typeFilters.network || t.network === typeFilters.network)
+                );
+                const shown = sortSpecs(matches, typeSort).slice(0, 200);
+                const selectedSpec = all.find(t => t.name === typeSelection);
+                // What the change would do to the bill, which is usually the
+                // actual question behind resizing.
+                const hourlyDelta = selectedSpec?.hourly !== undefined && currentSpec?.hourly !== undefined
+                    && typeSelection !== current
+                    ? selectedSpec.hourly - currentSpec.hourly
+                    : undefined;
+
+                // Sortable column header. Called as a function rather than
+                // rendered as a component — a component defined inside render is
+                // a new type every pass, so React would remount it and the
+                // button would lose focus on every sort click. Numeric columns
+                // are right-aligned, so there the arrow leads rather than trails.
+                const th = (label: string, sortKey: TypeSortKey, align: 'left' | 'right' = 'right', width = '') => {
+                    const active = typeSort.key === sortKey;
+                    return (
+                        <th key={label} className={`${width} font-medium p-0`} aria-sort={active ? (typeSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+                            <button
+                                type="button"
+                                onClick={() => sortByColumn(sortKey)}
+                                className={`w-full flex items-center gap-1 px-2 py-2 transition-colors ${align === 'right' ? 'justify-end' : 'justify-start'} ${
+                                    active ? 'text-blue-400' : 'text-slate-400 hover:text-white'
+                                }`}
+                                title={`Sort by ${label.toLowerCase()}`}
+                            >
+                                {align === 'right' && <SortArrow active={active} dir={typeSort.dir} />}
+                                {label}
+                                {align === 'left' && <SortArrow active={active} dir={typeSort.dir} />}
+                            </button>
+                        </th>
+                    );
+                };
+
+                return (
+                <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+                    <div className="bg-slate-900 border border-slate-700 rounded-lg shadow-2xl w-full max-w-4xl flex flex-col max-h-[85vh]">
+                        <div className="flex justify-between items-start p-6 pb-4 shrink-0">
+                            <div>
+                                <h3 className="text-lg font-semibold text-white flex items-center gap-2"><Cpu size={18} /> Instance Type</h3>
+                                <p className="text-xs text-slate-500 mt-0.5">
+                                    {inst ? (inst.label || inst.name) : typeModal.instanceId}
+                                    {inst?.architecture && <span className="font-mono ml-2">{inst.architecture}</span>}
+                                    {inst?.az && <span className="font-mono ml-2">{inst.az}</span>}
+                                </p>
+                            </div>
+                            <button type="button" onClick={() => setTypeModal(null)} className="text-slate-400 hover:text-white"><X size={20}/></button>
+                        </div>
+
+                        {/* Current type, spelled out in full. */}
+                        <div className="px-6 shrink-0">
+                            <div className="bg-slate-950 border border-slate-700 rounded p-3">
+                                <div className="flex items-center justify-between">
+                                    <span className="font-mono text-white text-base">{current || '—'}</span>
+                                    <span className="text-xs text-slate-500 uppercase tracking-wider">Current</span>
+                                </div>
+                                {currentSpec ? (
+                                    <>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 mt-2 text-xs">
+                                            <div><span className="text-slate-500">vCPU </span><span className="text-slate-300">{currentSpec.vcpus ?? '—'}</span></div>
+                                            <div><span className="text-slate-500">Memory </span><span className="text-slate-300">{formatMemory(currentSpec.memoryMib)}</span></div>
+                                            <div><span className="text-slate-500">Network </span><span className="text-slate-300">{currentSpec.network || '—'}</span></div>
+                                            <div><span className="text-slate-500">Clock </span><span className="text-slate-300">{currentSpec.clockSpeedGhz ? `${currentSpec.clockSpeedGhz} GHz` : '—'}</span></div>
+                                            <div><span className="text-slate-500">Storage </span><span className="text-slate-300">{currentSpec.storage}</span></div>
+                                            <div><span className="text-slate-500">GPU </span><span className="text-slate-300">{currentSpec.gpu || 'None'}</span></div>
+                                        </div>
+                                        <div className="flex items-baseline gap-4 mt-2 pt-2 border-t border-slate-800 text-xs">
+                                            <span className="text-slate-500">On-demand</span>
+                                            <span className="text-emerald-300 tabular-nums">{formatUsd(currentSpec.hourly, 4)}<span className="text-slate-500">/hr</span></span>
+                                        </div>
+                                    </>
+                                ) : (
+                                    <p className="text-xs text-slate-500 mt-2">{instanceTypes ? 'Specs unavailable for this type.' : 'Loading specs…'}</p>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="px-6 pt-4 pb-3 flex items-center gap-3 shrink-0">
+                            <input
+                                type="text"
+                                autoFocus
+                                value={typeSearch}
+                                onChange={e => setTypeSearch(e.target.value)}
+                                placeholder="Filter types — e.g. c5a, xlarge"
+                                className="flex-1 bg-slate-950 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500 font-mono"
+                            />
+                            <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer select-none shrink-0">
+                                <input type="checkbox" className="w-4 h-4" checked={currentGenOnly} onChange={e => setCurrentGenOnly(e.target.checked)} />
+                                Current generation
+                            </label>
+                        </div>
+
+                        {/* Exact-match spec filters. */}
+                        <div className="px-6 pb-3 flex items-center gap-2 flex-wrap shrink-0">
+                            {([
+                                { key: 'vcpus' as const, label: 'vCPU', options: vcpuOptions.map(v => [String(v), String(v)] as const) },
+                                { key: 'memoryMib' as const, label: 'Memory', options: memoryOptions.map(v => [String(v), formatMemory(v)] as const) },
+                                { key: 'network' as const, label: 'Network', options: networkOptions.map(v => [v, v] as const) }
+                            ]).map(({ key, label, options }) => (
+                                <select
+                                    key={key}
+                                    value={typeFilters[key]}
+                                    onChange={e => setTypeFilters({ ...typeFilters, [key]: e.target.value })}
+                                    className={`bg-slate-950 border rounded px-2 py-1.5 text-xs outline-none focus:border-blue-500 ${
+                                        typeFilters[key] ? 'border-blue-500/60 text-blue-300' : 'border-slate-700 text-slate-400'
+                                    }`}
+                                >
+                                    <option value="">{label}: any</option>
+                                    {options.map(([value, text]) => <option key={value} value={value}>{`${label}: ${text}`}</option>)}
+                                </select>
+                            ))}
+                            {filtersActive && (
+                                <button
+                                    type="button"
+                                    onClick={() => setTypeFilters({ vcpus: '', memoryMib: '', network: '' })}
+                                    className="text-xs text-slate-400 hover:text-white px-2 py-1.5 flex items-center gap-1"
+                                >
+                                    <X size={12} /> Clear
+                                </button>
+                            )}
+                            <span className="text-xs text-slate-500 ml-auto tabular-nums">
+                                {instanceTypes ? `${matches.length} of ${inGeneration.length} types` : ''}
+                            </span>
+                        </div>
+
+                        {/* What the cost columns are quoting — rates are per OS
+                            and per region, so both matter to reading them. */}
+                        {pricingMeta && (
+                            <p className="px-6 pb-2 text-xs text-slate-500 shrink-0">
+                                {pricingMeta.available ? (
+                                    <>On-demand rates for <span className="text-slate-400">{pricingMeta.os}</span> in <span className="text-slate-400 font-mono">{pricingMeta.region}</span>, shared tenancy. Compute only — storage and data transfer are extra.</>
+                                ) : (
+                                    <span className="text-amber-400/80">Pricing unavailable — the service role needs the <code className="text-amber-300/90">pricing:GetProducts</code> permission.</span>
+                                )}
+                            </p>
+                        )}
+
+                        <div className="flex-1 overflow-y-auto px-6 min-h-[8rem]">
+                            {typesError ? (
+                                <div className="text-sm text-red-400 py-6 text-center">{typesError}</div>
+                            ) : !instanceTypes ? (
+                                <div className="flex items-center justify-center gap-2 text-slate-500 py-10 text-sm">
+                                    <Loader2 size={16} className="animate-spin" /> Loading instance types…
+                                </div>
+                            ) : matches.length === 0 ? (
+                                <div className="text-sm text-slate-500 py-10 text-center">
+                                    {typeSearch || filtersActive
+                                        ? 'No instance types match these filters.'
+                                        : 'No compatible instance types found.'}
+                                </div>
+                            ) : (
+                                <>
+                                    <table className="w-full text-sm border-separate border-spacing-0">
+                                        <thead className="sticky top-0 bg-slate-900 z-10">
+                                            <tr className="text-xs">
+                                                {th('Type', 'name', 'left')}
+                                                {th('vCPU', 'vcpus', 'right', 'w-20')}
+                                                {th('Memory', 'memoryMib', 'right', 'w-28')}
+                                                {th('Network', 'networkGbps', 'right', 'w-36')}
+                                                {th('$/hr', 'hourly', 'right', 'w-28')}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {shown.map(t => {
+                                                const isCurrent = t.name === current;
+                                                const isSelected = t.name === typeSelection;
+                                                const cell = `px-2 py-1.5 border-t ${isSelected ? 'border-blue-500/30' : 'border-slate-800'}`;
+                                                return (
+                                                    <tr
+                                                        key={t.name}
+                                                        onClick={() => setTypeSelection(t.name)}
+                                                        className={`cursor-pointer transition-colors ${
+                                                            isSelected ? 'bg-blue-600/15' : 'hover:bg-slate-800/50'
+                                                        }`}
+                                                    >
+                                                        <td className={cell}>
+                                                            <div className="flex items-center gap-1.5 flex-wrap">
+                                                                <span className={`font-mono ${isSelected ? 'text-blue-300' : 'text-slate-200'}`}>{t.name}</span>
+                                                                {isCurrent && <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">current</span>}
+                                                                {t.burstable && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">burstable</span>}
+                                                                {!t.currentGeneration && <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700/40 text-slate-400 border border-slate-600/40">prev gen</span>}
+                                                            </div>
+                                                        </td>
+                                                        <td className={`${cell} text-right tabular-nums text-slate-300`}>{t.vcpus ?? '—'}</td>
+                                                        <td className={`${cell} text-right tabular-nums text-slate-300`}>{formatMemory(t.memoryMib)}</td>
+                                                        <td className={`${cell} text-right tabular-nums text-slate-400 text-xs`}>{t.network || '—'}</td>
+                                                        <td className={`${cell} text-right tabular-nums text-emerald-300/90`}>{formatUsd(t.hourly, 4)}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                    {matches.length > shown.length && (
+                                        <p className="text-xs text-slate-500 text-center py-3">
+                                            {matches.length - shown.length} more match — narrow the filter to see them.
+                                        </p>
+                                    )}
+                                </>
+                            )}
+                        </div>
+
+                        <div className="p-6 pt-4 shrink-0 border-t border-slate-800 mt-2">
+                            {!canResize && (
+                                <p className="text-xs text-amber-400/90 mb-3 flex items-start gap-2">
+                                    <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                                    The instance must be stopped before its type can be changed — it is currently '{inst?.state || 'unknown'}'.
+                                </p>
+                            )}
+                            <div className="flex justify-end items-center gap-3">
+                                {hourlyDelta !== undefined && (
+                                    <span className={`text-xs mr-auto tabular-nums ${hourlyDelta > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                                        {hourlyDelta > 0
+                                            ? `Costs ${formatUsd(hourlyDelta, 4)}/hr more than ${current}`
+                                            : `Saves ${formatUsd(-hourlyDelta, 4)}/hr against ${current}`}
+                                    </span>
+                                )}
+                                <button type="button" onClick={() => setTypeModal(null)} className="px-4 py-2 text-sm text-slate-300 hover:text-white">Cancel</button>
+                                <button
+                                    type="button"
+                                    onClick={() => changeInstanceType(typeModal.instanceId, typeSelection)}
+                                    disabled={!canResize || !typeSelection || typeSelection === current || changingType}
+                                    className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-blue-600"
+                                >
+                                    {changingType && <Loader2 size={14} className="animate-spin" />}
+                                    {typeSelection && typeSelection !== current ? `Change to ${typeSelection}` : 'Change type'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 );
             })()}

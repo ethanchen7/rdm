@@ -39,6 +39,8 @@ Browser (React SPA)  ──WebSocket──►  Backend (Express + guacamole-lite
 | Feature | Actions |
 |---|---|
 | List / start / stop instances | `ec2:DescribeInstances`, `ec2:StartInstances`, `ec2:StopInstances` |
+| Change instance type (Instance Settings modal) | `ec2:DescribeInstanceTypes`, `ec2:DescribeInstanceTypeOfferings`, `ec2:ModifyInstanceAttribute` |
+| Hourly / monthly cost in the type picker | `pricing:GetProducts` |
 | Auto-fetch Windows password | `ec2:GetPasswordData` |
 | Month-to-date bill (Settings modal) | `ce:GetCostAndUsage` |
 | SSM tunnel (optional) | `ssm:StartSession` on `AWS-StartPortForwardingSession`; instances need the SSM agent + a role |
@@ -181,6 +183,17 @@ nothing in the build needs to know it's mounted at `/rdpm/`. Use
 
 [clipboard-api]: https://developer.mozilla.org/en-US/docs/Web/API/Clipboard_API
 - **Settings** (gear) has global display options and your **month-to-date AWS spend**.
+- **Instance settings** (per-row gear) sets a custom name, RDP username and an
+  optional saved password. For EC2 rows it also shows the **instance type** —
+  click it to browse the types you can move to and resize the machine. Filter by
+  name, vCPU count, memory or network tier; the table sorts by **vCPU, memory,
+  network, or hourly cost** — the on-demand rate is quoted for the instance's own
+  OS and region (compute only, excluding storage and data transfer). Without
+  `pricing:GetProducts` the cost column reads `—` and everything else still
+  works. The list is limited to types matching the instance's architecture *and*
+  offered in its availability zone, so a resize can't leave you with a machine
+  that won't start again. AWS only allows a resize while the instance is
+  **stopped**.
 
 ## Development
 
