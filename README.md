@@ -216,11 +216,11 @@ curl -fsSL -o gs.tar.gz \
   https://github.com/apache/guacamole-server/archive/refs/tags/1.6.0.tar.gz
 tar xzf gs.tar.gz && cd guacamole-server-1.6.0
 # raise the cap (keep it well under the 8 MiB thread stack — the RDP copy path
-# allocates a buffer of this size on the stack). 2 MiB is a safe, generous value.
+# allocates a buffer of this size on the stack). 6 MiB leaves ~2 MiB of headroom.
 # (`sed -i.bak` works on both GNU/Linux and macOS/BSD sed; it leaves a .bak file.)
-sed -i.bak 's/#define GUAC_COMMON_CLIPBOARD_MAX_LENGTH .*/#define GUAC_COMMON_CLIPBOARD_MAX_LENGTH 2097152/' \
+sed -i.bak 's/#define GUAC_COMMON_CLIPBOARD_MAX_LENGTH .*/#define GUAC_COMMON_CLIPBOARD_MAX_LENGTH 6291456/' \
   src/common/common/clipboard.h
-docker build -t guacamole/guacd:1.6.0-clip2m \
+docker build -t guacamole/guacd:1.6.0-clip6m \
   --build-arg GUACAMOLE_SERVER_OPTS="--disable-guaclog --enable-allow-freerdp-snapshots CPPFLAGS=-Wno-error=deprecated-declarations" .
 ```
 Then run that tag instead of `guacamole/guacd` in step 2.
