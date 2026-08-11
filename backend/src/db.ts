@@ -23,9 +23,17 @@ export async function initDb() {
             name TEXT NOT NULL,
             ip TEXT NOT NULL,
             username TEXT NOT NULL,
-            encrypted_password TEXT
+            encrypted_password TEXT,
+            protocol TEXT NOT NULL DEFAULT 'rdp'
         );
     `);
+
+    // CREATE TABLE IF NOT EXISTS doesn't add columns to a table that already
+    // exists from before `protocol` was introduced — migrate those in place.
+    const customCols = await db.all(`PRAGMA table_info(custom_instances)`);
+    if (!customCols.some((c: any) => c.name === 'protocol')) {
+        await db.exec(`ALTER TABLE custom_instances ADD COLUMN protocol TEXT NOT NULL DEFAULT 'rdp'`);
+    }
 
     // Per-EC2 credential/label overrides. EC2 instances are discovered from AWS
     // (not stored), so this table only holds the bits the user can edit: a
@@ -70,11 +78,11 @@ function decrypt(text: string): string {
 // Custom (non-EC2) instances
 // ---------------------------------------------------------------------------
 
-export async function addCustomInstance(id: string, name: string, ip: string, username: string, password?: string) {
+export async function addCustomInstance(id: string, name: string, ip: string, username: string, password?: string, protocol: string = 'rdp') {
     const encPass = password ? encrypt(password) : '';
     await db.run(
-        'INSERT OR REPLACE INTO custom_instances (id, name, ip, username, encrypted_password) VALUES (?, ?, ?, ?, ?)',
-        [id, name, ip, username, encPass]
+        'INSERT OR REPLACE INTO custom_instances (id, name, ip, username, encrypted_password, protocol) VALUES (?, ?, ?, ?, ?, ?)',
+        [id, name, ip, username, encPass, protocol]
     );
 }
 
@@ -84,30 +92,31 @@ export async function addCustomInstance(id: string, name: string, ip: string, us
 // empty string clears it.
 export async function updateCustomInstance(
     id: string,
-    fields: { name: string; ip: string; username: string; changePassword?: boolean; password?: string }
+    fields: { name: string; ip: string; username: string; protocol: string; changePassword?: boolean; password?: string }
 ) {
     if (fields.changePassword) {
         const encPass = fields.password ? encrypt(fields.password) : '';
         await db.run(
-            'UPDATE custom_instances SET name = ?, ip = ?, username = ?, encrypted_password = ? WHERE id = ?',
-            [fields.name, fields.ip, fields.username, encPass, id]
+            'UPDATE custom_instances SET name = ?, ip = ?, username = ?, protocol = ?, encrypted_password = ? WHERE id = ?',
+            [fields.name, fields.ip, fields.username, fields.protocol, encPass, id]
         );
     } else {
         await db.run(
-            'UPDATE custom_instances SET name = ?, ip = ?, username = ? WHERE id = ?',
-            [fields.name, fields.ip, fields.username, id]
+            'UPDATE custom_instances SET name = ?, ip = ?, username = ?, protocol = ? WHERE id = ?',
+            [fields.name, fields.ip, fields.username, fields.protocol, id]
         );
     }
 }
 
 export async function getCustomInstances() {
-    const rows = await db.all('SELECT id, name, ip, username, encrypted_password FROM custom_instances');
+    const rows = await db.all('SELECT id, name, ip, username, encrypted_password, protocol FROM custom_instances');
     // Never leak the password to the client — expose only whether one is set.
     return rows.map((r: any) => ({
         id: r.id,
         name: r.name,
         ip: r.ip,
         username: r.username,
+        protocol: r.protocol || 'rdp',
         hasPassword: !!r.encrypted_password
     }));
 }

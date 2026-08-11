@@ -295,8 +295,8 @@ app.get('/api/custom-instances', async (req, res) => {
 
 app.post('/api/custom-instances', async (req, res) => {
     try {
-        const { id, name, ip, username, password } = req.body;
-        await addCustomInstance(id, name, ip, username, password);
+        const { id, name, ip, username, password, protocol } = req.body;
+        await addCustomInstance(id, name, ip, username, password, protocol || 'rdp');
         res.json({ success: true });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
@@ -305,8 +305,8 @@ app.post('/api/custom-instances', async (req, res) => {
 
 app.put('/api/custom-instances/:id', async (req, res) => {
     try {
-        const { name, ip, username, changePassword, password } = req.body;
-        await updateCustomInstance(req.params.id, { name, ip, username, changePassword, password });
+        const { name, ip, username, protocol, changePassword, password } = req.body;
+        await updateCustomInstance(req.params.id, { name, ip, username, protocol: protocol || 'rdp', changePassword, password });
         res.json({ success: true });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
@@ -349,6 +349,9 @@ app.post('/api/connect', async (req, res) => {
         let rdpPort = 3389;
         let dynamicPassword = '';
         let username = process.env.AWS_RDP_USERNAME || 'Administrator';
+        // EC2 instances are always RDP (Windows Server, password via
+        // GetPasswordData) — only a custom instance can be VNC.
+        let protocol = 'rdp';
 
         if (customId) {
             const custom = await getCustomInstance(customId);
@@ -358,6 +361,8 @@ app.post('/api/connect', async (req, res) => {
             rdpHostname = custom.ip;
             dynamicPassword = custom.password || '';
             username = custom.username || 'Administrator';
+            protocol = custom.protocol || 'rdp';
+            if (protocol === 'vnc') rdpPort = 5900;
         } else if (instanceId) {
             if (USE_SSM_TUNNEL) {
                 rdpPort = await startSSMTunnel(instanceId);
@@ -396,8 +401,44 @@ app.post('/api/connect', async (req, res) => {
             return res.status(400).json({ error: 'Missing instanceId or customId' });
         }
         
-        // Prepare Guacamole connection settings for this tunnel
-        const connectionSettings = {
+        // Prepare Guacamole connection settings for this tunnel. RDP and VNC
+        // take different parameter sets — VNC has no NLA/theming/composition
+        // concept, and the server (not the client) dictates its own
+        // resolution, so width/height don't apply.
+        const connectionSettings = protocol === 'vnc' ? {
+            connection: {
+                type: 'vnc',
+                settings: {
+                    hostname: rdpHostname,
+                    port: rdpPort.toString(),
+                    // Sent for UltraVNC MS-Logon (username+password); ignored
+                    // by servers using plain VNC password auth.
+                    username: username,
+                    password: dynamicPassword || '',
+                    // Default (local) renders the cursor client-side from a
+                    // bitmap+mask UltraVNC sends — its mask format and
+                    // Guacamole's interpretation of it disagree, leaving the
+                    // "transparent" area a solid pink/magenta. Remote bakes
+                    // the cursor into the screen image server-side instead,
+                    // sidestepping the mismatch entirely (slightly less
+                    // snappy cursor movement, irrelevant for this use case).
+                    cursor: 'remote',
+                    // Otherwise guacd is free to send a SetDesktopSize
+                    // request matching whatever pixel size the grid pane
+                    // currently renders at, and UltraVNC honors it — which
+                    // is what's been forcing the real Windows resolution
+                    // down to match the pane instead of staying at whatever
+                    // was set locally.
+                    'disable-display-resize': 'true',
+                    'color-depth': settings.colorDepth || '32',
+                    // Guacamole's VNC encoder otherwise auto-selects lossy
+                    // JPEG-style compression, which introduces slight color
+                    // quantization RDP's path doesn't have. Fine to trade the
+                    // bandwidth for exact color on a LAN/WireGuard session.
+                    'force-lossless': 'true'
+                }
+            }
+        } : {
             connection: {
                 type: 'rdp',
                 settings: {

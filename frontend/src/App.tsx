@@ -125,6 +125,7 @@ interface CustomInstance {
     name: string;
     ip: string;
     username: string;
+    protocol?: 'rdp' | 'vnc';
     hasPassword?: boolean;
 }
 
@@ -330,7 +331,7 @@ function App() {
     // Instance add/edit modal + its form.
     const [instanceModal, setInstanceModal] = useState<InstanceModal | null>(null);
     const [instanceForm, setInstanceForm] = useState({
-        name: '', ip: '', username: 'Administrator',
+        name: '', ip: '', username: 'Administrator', protocol: 'rdp' as 'rdp' | 'vnc',
         password: '', changePassword: false, hasPassword: false
     });
 
@@ -646,12 +647,12 @@ function App() {
 
     // Open the add/edit modal, prefilled for the target.
     const openAddModal = () => {
-        setInstanceForm({ name: '', ip: '', username: 'Administrator', password: '', changePassword: true, hasPassword: false });
+        setInstanceForm({ name: '', ip: '', username: 'Administrator', protocol: 'rdp', password: '', changePassword: true, hasPassword: false });
         setInstanceModal({ mode: 'add' });
     };
 
     const openEditCustom = (inst: CustomInstance) => {
-        setInstanceForm({ name: inst.name, ip: inst.ip, username: inst.username || 'Administrator', password: '', changePassword: false, hasPassword: !!inst.hasPassword });
+        setInstanceForm({ name: inst.name, ip: inst.ip, username: inst.username || 'Administrator', protocol: inst.protocol || 'rdp', password: '', changePassword: false, hasPassword: !!inst.hasPassword });
         setInstanceModal({ mode: 'edit-custom', id: inst.id });
     };
 
@@ -660,6 +661,7 @@ function App() {
             name: inst.label || inst.name,
             ip: inst.publicIp || inst.privateIp || '',
             username: inst.username || 'Administrator',
+            protocol: 'rdp',
             password: '', changePassword: false, hasPassword: !!inst.hasPassword
         });
         setInstanceModal({ mode: 'edit-ec2', id: inst.id });
@@ -809,13 +811,13 @@ function App() {
                 await fetch(`${API_BASE}/custom-instances`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: 'custom-' + Date.now(), name: f.name, ip: f.ip, username: f.username, password: f.password })
+                    body: JSON.stringify({ id: 'custom-' + Date.now(), name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, password: f.password })
                 });
             } else if (instanceModal.mode === 'edit-custom') {
                 await fetch(`${API_BASE}/custom-instances/${instanceModal.id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: f.name, ip: f.ip, username: f.username, changePassword: f.changePassword, password: f.password })
+                    body: JSON.stringify({ name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, changePassword: f.changePassword, password: f.password })
                 });
             } else if (instanceModal.mode === 'edit-ec2') {
                 await fetch(`${API_BASE}/ec2-settings/${instanceModal.id}`, {
@@ -1329,7 +1331,7 @@ function App() {
             {instanceModal && (() => {
                 const isEc2 = instanceModal.mode === 'edit-ec2';
                 const isAdd = instanceModal.mode === 'add';
-                const title = isAdd ? 'Add Custom RDP' : isEc2 ? 'EC2 Instance Settings' : 'Instance Settings';
+                const title = isAdd ? 'Add Custom Connection' : isEc2 ? 'EC2 Instance Settings' : 'Instance Settings';
                 // Read live rather than from the form: the type is changed
                 // through its own modal (an AWS-side action), not saved with the
                 // local overrides below.
@@ -1361,6 +1363,24 @@ function App() {
                                 />
                                 {isEc2 && <p className="text-xs text-slate-500 mt-1">Managed by AWS — updates automatically.</p>}
                             </div>
+                            {!isEc2 && (
+                                <div>
+                                    <label className="block text-xs text-slate-400 mb-1">Protocol</label>
+                                    <select
+                                        className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white outline-none focus:border-blue-500"
+                                        value={instanceForm.protocol}
+                                        onChange={e => setInstanceForm({...instanceForm, protocol: e.target.value as 'rdp' | 'vnc'})}
+                                    >
+                                        <option value="rdp">RDP (port 3389)</option>
+                                        <option value="vnc">VNC (port 5900)</option>
+                                    </select>
+                                    {instanceForm.protocol === 'vnc' && (
+                                        <p className="text-xs text-slate-500 mt-1">
+                                            Most VNC servers (e.g. UltraVNC) refuse all connections with a blank password — set one below even if the server's real auth is MS-Logon.
+                                        </p>
+                                    )}
+                                </div>
+                            )}
                             {ec2Inst && (
                                 <div>
                                     <label className="block text-xs text-slate-400 mb-1">Instance Type</label>
