@@ -31,6 +31,7 @@ interface EC2Instance {
     username?: string;
     hasPassword?: boolean;
     os?: '' | 'windows' | 'macos' | 'linux';
+    swapKeys?: boolean;
 }
 
 // One entry of the region's instance-type catalogue (backend /api/instance-types).
@@ -138,6 +139,7 @@ interface CustomInstance {
     protocol?: 'rdp' | 'vnc';
     hasPassword?: boolean;
     os?: '' | 'windows' | 'macos' | 'linux';
+    swapKeys?: boolean;
 }
 
 interface Billing {
@@ -343,7 +345,7 @@ function App() {
     const [instanceModal, setInstanceModal] = useState<InstanceModal | null>(null);
     const [instanceForm, setInstanceForm] = useState({
         name: '', ip: '', username: 'Administrator', protocol: 'rdp' as 'rdp' | 'vnc',
-        os: '' as '' | 'windows' | 'macos' | 'linux',
+        os: '' as '' | 'windows' | 'macos' | 'linux', swapKeys: false,
         password: '', changePassword: false, hasPassword: false
     });
 
@@ -659,12 +661,12 @@ function App() {
 
     // Open the add/edit modal, prefilled for the target.
     const openAddModal = () => {
-        setInstanceForm({ name: '', ip: '', username: 'Administrator', protocol: 'rdp', os: '', password: '', changePassword: true, hasPassword: false });
+        setInstanceForm({ name: '', ip: '', username: 'Administrator', protocol: 'rdp', os: '', swapKeys: false, password: '', changePassword: true, hasPassword: false });
         setInstanceModal({ mode: 'add' });
     };
 
     const openEditCustom = (inst: CustomInstance) => {
-        setInstanceForm({ name: inst.name, ip: inst.ip, username: inst.username || 'Administrator', protocol: inst.protocol || 'rdp', os: inst.os || '', password: '', changePassword: false, hasPassword: !!inst.hasPassword });
+        setInstanceForm({ name: inst.name, ip: inst.ip, username: inst.username || 'Administrator', protocol: inst.protocol || 'rdp', os: inst.os || '', swapKeys: !!inst.swapKeys, password: '', changePassword: false, hasPassword: !!inst.hasPassword });
         setInstanceModal({ mode: 'edit-custom', id: inst.id });
     };
 
@@ -674,7 +676,7 @@ function App() {
             ip: inst.publicIp || inst.privateIp || '',
             username: inst.username || 'Administrator',
             protocol: 'rdp',
-            os: inst.os || '',
+            os: inst.os || '', swapKeys: !!inst.swapKeys,
             password: '', changePassword: false, hasPassword: !!inst.hasPassword
         });
         setInstanceModal({ mode: 'edit-ec2', id: inst.id });
@@ -824,19 +826,19 @@ function App() {
                 await fetch(`${API_BASE}/custom-instances`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: 'custom-' + Date.now(), name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, os: f.os, password: f.password })
+                    body: JSON.stringify({ id: 'custom-' + Date.now(), name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, os: f.os, swapKeys: f.swapKeys, password: f.password })
                 });
             } else if (instanceModal.mode === 'edit-custom') {
                 await fetch(`${API_BASE}/custom-instances/${instanceModal.id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, os: f.os, changePassword: f.changePassword, password: f.password })
+                    body: JSON.stringify({ name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, os: f.os, swapKeys: f.swapKeys, changePassword: f.changePassword, password: f.password })
                 });
             } else if (instanceModal.mode === 'edit-ec2') {
                 await fetch(`${API_BASE}/ec2-settings/${instanceModal.id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ label: f.name, username: f.username, os: f.os, changePassword: f.changePassword, password: f.password })
+                    body: JSON.stringify({ label: f.name, username: f.username, os: f.os, swapKeys: f.swapKeys, changePassword: f.changePassword, password: f.password })
                 });
             }
             await Promise.all([fetchCustomInstances(), fetchInstances()]);
@@ -1326,6 +1328,7 @@ function App() {
                                 const name = custom?.name || ec2?.label || ec2?.name || session.name;
                                 const ip = custom?.ip || ec2?.publicIp || ec2?.privateIp || session.ip;
                                 const os = custom?.os || ec2?.os || '';
+                                const swapCtrlCmd = os === 'macos' && !!(custom?.swapKeys || ec2?.swapKeys);
                                 const isDropTarget = dragOverId === session.instanceId && dragId !== session.instanceId;
                                 return (
                                 <div
@@ -1342,6 +1345,7 @@ function App() {
                                         ip={ip}
                                         protocol={custom?.protocol || 'rdp'}
                                         os={os}
+                                        swapCtrlCmd={swapCtrlCmd}
                                         clipboard={sharedClipboard}
                                         onClipboard={publishClipboard}
                                         onDisconnect={() => disconnectInstance(session.instanceId)}
@@ -1416,13 +1420,19 @@ function App() {
                                 <select
                                     className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white outline-none focus:border-blue-500"
                                     value={instanceForm.os}
-                                    onChange={e => setInstanceForm({...instanceForm, os: e.target.value as '' | 'windows' | 'macos' | 'linux'})}
+                                    onChange={e => setInstanceForm({...instanceForm, os: e.target.value as '' | 'windows' | 'macos' | 'linux', swapKeys: e.target.value === 'macos' ? instanceForm.swapKeys : false})}
                                 >
                                     <option value="">None</option>
                                     <option value="windows">Windows</option>
                                     <option value="macos">macOS</option>
                                     <option value="linux">Linux</option>
                                 </select>
+                                {instanceForm.os === 'macos' && (
+                                    <label className="flex items-center gap-2 text-sm text-slate-300 mt-2 cursor-pointer select-none">
+                                        <input type="checkbox" className="w-4 h-4" checked={instanceForm.swapKeys} onChange={e => setInstanceForm({...instanceForm, swapKeys: e.target.checked})} />
+                                        Swap Ctrl / Cmd
+                                    </label>
+                                )}
                             </div>
                             {ec2Inst && (
                                 <div>

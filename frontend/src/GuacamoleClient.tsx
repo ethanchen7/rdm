@@ -11,6 +11,10 @@ interface Props {
     ip: string;
     protocol?: 'rdp' | 'vnc';
     os?: '' | 'windows' | 'macos' | 'linux';
+    // Swaps Ctrl and Cmd/Meta keysyms sent to the remote — for macOS targets
+    // where the user wants the physical key they'd hit for a shortcut on a PC
+    // (Ctrl) to land as Cmd on the Mac, and vice versa.
+    swapCtrlCmd?: boolean;
     onDisconnect: () => void;
     // Reported when the session fails rather than being closed deliberately —
     // guacd down, the tunnel dropping, an RDP-level refusal. The pane goes away
@@ -29,7 +33,7 @@ interface Props {
     onClipboard: (text: string) => void;
 }
 
-export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os, onDisconnect, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
+export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os, swapCtrlCmd, onDisconnect, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
     const rootRef = useRef<HTMLDivElement>(null);
     const headerRef = useRef<HTMLDivElement>(null);
     const displayRef = useRef<HTMLDivElement>(null);
@@ -44,6 +48,14 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
     onClipboardRef.current = onClipboard;
     const onErrorRef = useRef(onError);
     onErrorRef.current = onError;
+    // Same reason: read fresh on every keypress rather than frozen at whatever
+    // it was when the pane first connected. Without this, a session that
+    // mounted before its instance's `os`/`swapKeys` had loaded (e.g. a
+    // session restored on page load, racing the customInstances fetch) would
+    // silently and permanently ignore the setting for its whole lifetime —
+    // toggling it in Settings would appear to do nothing without a reconnect.
+    const swapCtrlCmdRef = useRef(swapCtrlCmd);
+    swapCtrlCmdRef.current = swapCtrlCmd;
     // Whether this session ever reached 'Connected', and whether it failed. A
     // disconnect that follows neither a failure nor a live session is the tunnel
     // dying on the way up — worth reporting, unlike a normal close.
@@ -169,6 +181,33 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
         const keyboard = new Guacamole.Keyboard(document);
         const pressedKeys = new Set<number>();
 
+        // Ctrl <-> Cmd/Meta keysyms (see guacamole-common-js's keysym table).
+        // Swapped in both directions so muscle-memory shortcuts land correctly
+        // on a macOS target regardless of which one was physically pressed.
+        // Browsers always report the physical Cmd/Win key as keysym Meta_L/R
+        // (0xFFE7/0xFFE8) — that's what guacamole-common-js's own keysym table
+        // maps the DOM "Meta" key to on every platform. But Apple's built-in
+        // VNC server (Screen Sharing) doesn't bind Command to that keysym; it
+        // listens for the X11 "Super" keysym (0xFFEB/0xFFEC) instead. So the
+        // outgoing side of this swap targets Super, not Meta — Meta is still
+        // accepted coming *in* (mapped back to Ctrl) in case some client ever
+        // sends it.
+        const CTRL_L = 0xFFE3, CTRL_R = 0xFFE4;
+        const META_L = 0xFFE7, META_R = 0xFFE8;
+        const SUPER_L = 0xFFEB, SUPER_R = 0xFFEC;
+        const remapKeysym = (keysym: number) => {
+            if (!swapCtrlCmdRef.current) return keysym;
+            switch (keysym) {
+                case CTRL_L: return SUPER_L;
+                case CTRL_R: return SUPER_R;
+                case SUPER_L:
+                case META_L: return CTRL_L;
+                case SUPER_R:
+                case META_R: return CTRL_R;
+                default: return keysym;
+            }
+        };
+
         const releaseAllKeys = () => {
             pressedKeys.forEach((keysym) => client.sendKeyEvent(0, keysym));
             pressedKeys.clear();
@@ -178,16 +217,18 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
             // Not focused: let the browser handle the key (typing in inputs, etc.)
             // and do NOT preventDefault.
             if (document.activeElement !== focusTarget) return true;
-            client.sendKeyEvent(1, keysym);
-            pressedKeys.add(keysym);
+            const sent = remapKeysym(keysym);
+            client.sendKeyEvent(1, sent);
+            pressedKeys.add(sent);
             // Focused: preventDefault so modifier combos (Ctrl, Alt, Ctrl+Alt+…)
             // reach the remote instead of triggering the browser's own shortcuts.
             return false;
         };
         keyboard.onkeyup = (keysym) => {
-            if (!pressedKeys.has(keysym)) return true;
-            client.sendKeyEvent(0, keysym);
-            pressedKeys.delete(keysym);
+            const sent = remapKeysym(keysym);
+            if (!pressedKeys.has(sent)) return true;
+            client.sendKeyEvent(0, sent);
+            pressedKeys.delete(sent);
             return false;
         };
 
