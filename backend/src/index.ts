@@ -7,6 +7,7 @@ import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import path from 'path';
 import { EC2Client, DescribeInstancesCommand, StartInstancesCommand, StopInstancesCommand, DescribeInstanceTypesCommand, DescribeInstanceTypeOfferingsCommand, ModifyInstanceAttributeCommand } from '@aws-sdk/client-ec2';
@@ -16,12 +17,23 @@ import GuacamoleLite from 'guacamole-lite';
 import { startSSMTunnel } from './ssmTunnel';
 import { getWindowsPassword } from './passwordDecrypt';
 import { initDb, addCustomInstance, updateCustomInstance, getCustomInstances, deleteCustomInstance, getCustomInstance, getAllEc2Settings, getEc2SettingFull, upsertEc2Setting } from './db';
+import { authRouter, requireAuth } from './auth';
 // @ts-ignore
 import Crypt from 'guacamole-lite/lib/Crypt';
 
 dotenv.config();
 
 const app = express();
+
+// Unset by default — req.ip (used by TRUSTED_LAN_CIDRS, see network.ts) then
+// reflects the raw TCP source address, ignoring X-Forwarded-For entirely
+// (untrusted and spoofable coming from the open internet). Only set this if
+// the app is deployed behind the optional reverse proxy AND that proxy is
+// configured to set X-Forwarded-For itself — see the README's "Behind a
+// reverse proxy" section. Typically "loopback" (proxy on the same host).
+if (process.env.TRUST_PROXY) {
+    app.set('trust proxy', process.env.TRUST_PROXY);
+}
 
 // Optional built-in TLS so the app can run standalone over HTTPS — needed for
 // browser clipboard sync (secure context) — without a reverse proxy in front.
@@ -45,8 +57,19 @@ if (TLS_CERT && TLS_KEY) {
 // this service (see ../../deploy.json), so the SPA is served from here too.
 const FRONTEND_DIST = path.join(__dirname, '..', '..', 'frontend', 'dist');
 
-app.use(cors());
+// `credentials: true` + reflecting the request origin (rather than `*`) is
+// required for the session cookie to work cross-origin in dev mode (the Vite
+// dev server runs on its own port). In the documented standalone/proxy
+// deployments the frontend and API share an origin, so this is a no-op there.
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
+app.use(cookieParser());
+
+// Auth routes are mostly public (login/setup/status) with their own rules;
+// every other /api/* route requires a session. Registration order matters —
+// requireAuth must come after authRouter so /api/auth/* isn't gated by it.
+app.use('/api/auth', authRouter);
+app.use('/api', requireAuth);
 
 const ec2 = new EC2Client({});
 // Cost Explorer is a global service that only lives in us-east-1.

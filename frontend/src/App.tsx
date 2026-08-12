@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
-import { Grid, LayoutGrid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check, Cpu } from 'lucide-react';
+import { Grid, LayoutGrid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check, Cpu, LogOut, ShieldCheck, ShieldOff } from 'lucide-react';
 import { GuacamoleClient } from './GuacamoleClient';
 import { useDeviceClipboard } from './deviceClipboard';
 import { OS_ICONS } from './OsIcons';
+import type { AuthStatus } from './Auth';
 import './index.css';
 
 let toastSeq = 0;
@@ -291,7 +292,12 @@ const reconcileRequests = (
     return { next: unchanged ? requests : next, failures };
 };
 
-function App() {
+interface AppProps {
+    authStatus: AuthStatus;
+    onAuthRefresh: () => void;
+}
+
+function App({ authStatus, onAuthRefresh }: AppProps) {
     const [instances, setInstances] = useState<EC2Instance[]>([]);
     const [activeSessions, setActiveSessions] = useState<Record<string, ActiveSession>>({});
     // Explicit render order for the grid, so panes can be dragged to reorder.
@@ -483,6 +489,131 @@ function App() {
     useEffect(() => {
         if (isSettingsModalOpen) fetchGuacd();
     }, [isSettingsModalOpen, fetchGuacd]);
+
+    // Security section (Settings modal) — password change, optional TOTP 2FA,
+    // and the inactivity auto-logout threshold. The session itself is owned
+    // by AuthGate (see Auth.tsx); this just triggers changes and asks it to
+    // re-fetch `/api/auth/status` afterwards via onAuthRefresh.
+    const [pwCurrent, setPwCurrent] = useState('');
+    const [pwNew, setPwNew] = useState('');
+    const [pwConfirm, setPwConfirm] = useState('');
+    const [pwBusy, setPwBusy] = useState(false);
+
+    const [totpSetup, setTotpSetup] = useState<{ qr: string; secret: string } | null>(null);
+    const [totpCode, setTotpCode] = useState('');
+    const [totpBusy, setTotpBusy] = useState(false);
+    const [showTotpDisable, setShowTotpDisable] = useState(false);
+    const [totpDisablePassword, setTotpDisablePassword] = useState('');
+
+    const [inactivityMinutes, setInactivityMinutes] = useState(String(authStatus.inactivityTimeoutMinutes ?? 0));
+    const [inactivityBusy, setInactivityBusy] = useState(false);
+    useEffect(() => {
+        setInactivityMinutes(String(authStatus.inactivityTimeoutMinutes ?? 0));
+    }, [authStatus.inactivityTimeoutMinutes]);
+
+    const changePassword = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (pwNew !== pwConfirm) return pushToast("New passwords don't match", 'error');
+        setPwBusy(true);
+        try {
+            const res = await fetch(`${API_BASE}/auth/password`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ currentPassword: pwCurrent, newPassword: pwNew })
+            });
+            if (!res.ok) throw new Error(await readErrorMessage(res));
+            pushToast('Password changed', 'success');
+            setPwCurrent(''); setPwNew(''); setPwConfirm('');
+        } catch (err: any) {
+            pushToast(err.message || 'Failed to change password', 'error');
+        } finally {
+            setPwBusy(false);
+        }
+    };
+
+    const startTotpSetup = async () => {
+        setTotpBusy(true);
+        try {
+            const res = await fetch(`${API_BASE}/auth/totp/setup`, { method: 'POST' });
+            if (!res.ok) throw new Error(await readErrorMessage(res));
+            const data = await res.json();
+            setTotpSetup({ qr: data.qr, secret: data.secret });
+        } catch (err: any) {
+            pushToast(err.message || 'Failed to start 2FA setup', 'error');
+        } finally {
+            setTotpBusy(false);
+        }
+    };
+
+    const confirmTotpSetup = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setTotpBusy(true);
+        try {
+            const res = await fetch(`${API_BASE}/auth/totp/verify-setup`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: totpCode })
+            });
+            if (!res.ok) throw new Error(await readErrorMessage(res));
+            pushToast('Two-factor authentication enabled', 'success');
+            setTotpSetup(null);
+            setTotpCode('');
+            onAuthRefresh();
+        } catch (err: any) {
+            pushToast(err.message || 'Invalid code', 'error');
+        } finally {
+            setTotpBusy(false);
+        }
+    };
+
+    const disableTotp = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setTotpBusy(true);
+        try {
+            const res = await fetch(`${API_BASE}/auth/totp/disable`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: totpDisablePassword })
+            });
+            if (!res.ok) throw new Error(await readErrorMessage(res));
+            pushToast('Two-factor authentication disabled', 'success');
+            setShowTotpDisable(false);
+            setTotpDisablePassword('');
+            onAuthRefresh();
+        } catch (err: any) {
+            pushToast(err.message || 'Failed to disable 2FA', 'error');
+        } finally {
+            setTotpBusy(false);
+        }
+    };
+
+    const saveInactivityTimeout = async () => {
+        const minutes = Number(inactivityMinutes);
+        if (!Number.isFinite(minutes) || minutes < 0) return pushToast('Enter a valid number of minutes', 'error');
+        setInactivityBusy(true);
+        try {
+            const res = await fetch(`${API_BASE}/auth/inactivity-timeout`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ minutes })
+            });
+            if (!res.ok) throw new Error(await readErrorMessage(res));
+            pushToast(minutes > 0 ? `Auto-logout set to ${minutes} minute${minutes === 1 ? '' : 's'} of inactivity` : 'Inactivity auto-logout disabled', 'success');
+            onAuthRefresh();
+        } catch (err: any) {
+            pushToast(err.message || 'Failed to save', 'error');
+        } finally {
+            setInactivityBusy(false);
+        }
+    };
+
+    const logout = async () => {
+        try {
+            await fetch(`${API_BASE}/auth/logout`, { method: 'POST' });
+        } finally {
+            onAuthRefresh();
+        }
+    };
 
     const runGuacdAction = async (action: GuacdAction) => {
         setGuacdAction(action);
@@ -1862,7 +1993,7 @@ function App() {
             {/* Global Settings Modal */}
             {isSettingsModalOpen && (
                 <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
-                    <div className="bg-slate-900 border border-slate-700 p-6 rounded-lg shadow-2xl w-full max-w-sm">
+                    <div className="bg-slate-900 border border-slate-700 p-6 rounded-lg shadow-2xl w-full max-w-sm max-h-[85vh] overflow-y-auto">
                         <div className="flex justify-between items-center mb-4">
                             <h3 className="text-lg font-semibold text-white">Global Settings</h3>
                             <button onClick={() => setIsSettingsModalOpen(false)} className="text-slate-400 hover:text-white"><X size={20}/></button>
@@ -1985,6 +2116,109 @@ function App() {
                                     setGlobalSettings(newSet);
                                     localStorage.setItem('rdpm_settings', JSON.stringify(newSet));
                                 }} className="w-4 h-4" />
+                            </div>
+
+                            <div className="border-t border-slate-700 pt-4">
+                                <h4 className="text-sm font-semibold text-slate-200 mb-3">Security</h4>
+
+                                <div className="bg-slate-950 border border-slate-700 rounded p-3 flex items-center justify-between">
+                                    <div>
+                                        <span className="text-sm text-slate-300">Signed in as </span>
+                                        <span className="text-sm text-white font-medium">{authStatus.username}</span>
+                                    </div>
+                                    <button onClick={logout} className="flex items-center gap-1.5 text-xs text-red-300 hover:text-red-200 border border-red-500/50 bg-red-500/10 hover:bg-red-500/20 rounded px-2 py-1.5">
+                                        <LogOut size={13} /> Log out
+                                    </button>
+                                </div>
+
+                                <form onSubmit={changePassword} className="bg-slate-950 border border-slate-700 rounded p-3 mt-3 space-y-2">
+                                    <p className="text-sm text-slate-300">Change password</p>
+                                    <input type="password" placeholder="Current password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={pwCurrent} onChange={e => setPwCurrent(e.target.value)} required />
+                                    <input type="password" placeholder="New password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={pwNew} onChange={e => setPwNew(e.target.value)} minLength={8} required />
+                                    <input type="password" placeholder="Confirm new password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} minLength={8} required />
+                                    <button type="submit" disabled={pwBusy || !pwCurrent || !pwNew} className="w-full px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center justify-center gap-1.5">
+                                        {pwBusy && <Loader2 size={12} className="animate-spin" />} Update password
+                                    </button>
+                                </form>
+
+                                <div className="bg-slate-950 border border-slate-700 rounded p-3 mt-3">
+                                    <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                            {authStatus.totpEnabled ? <ShieldCheck size={16} className="text-emerald-400" /> : <ShieldOff size={16} className="text-slate-500" />}
+                                            <span className="text-sm text-slate-300">Two-factor authentication</span>
+                                        </div>
+                                        <span className={`text-xs ${authStatus.totpEnabled ? 'text-emerald-400' : 'text-slate-500'}`}>{authStatus.totpEnabled ? 'Enabled' : 'Disabled'}</span>
+                                    </div>
+                                    <p className="text-xs text-slate-500 mt-1">
+                                        Only asked for when signing in from outside the trusted LAN (e.g. over a WireGuard/Tailscale tunnel) — same-LAN logins skip it.
+                                    </p>
+
+                                    {!authStatus.totpEnabled && !totpSetup && (
+                                        <button onClick={startTotpSetup} disabled={totpBusy} className="mt-3 w-full px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center justify-center gap-1.5">
+                                            {totpBusy && <Loader2 size={12} className="animate-spin" />} Enable 2FA
+                                        </button>
+                                    )}
+
+                                    {totpSetup && (
+                                        <form onSubmit={confirmTotpSetup} className="mt-3 space-y-2">
+                                            <img src={totpSetup.qr} alt="2FA QR code" className="mx-auto rounded border border-slate-700 bg-white p-1" width={160} height={160} />
+                                            <p className="text-xs text-slate-500 text-center break-all">
+                                                Scan with your authenticator app, or enter manually: <code className="text-slate-400">{totpSetup.secret}</code>
+                                            </p>
+                                            <input
+                                                className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white text-center tracking-[0.3em] outline-none focus:border-blue-500"
+                                                value={totpCode}
+                                                onChange={e => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                                                inputMode="numeric"
+                                                maxLength={6}
+                                                placeholder="6-digit code"
+                                                autoFocus
+                                                required
+                                            />
+                                            <div className="flex gap-2">
+                                                <button type="button" onClick={() => { setTotpSetup(null); setTotpCode(''); }} className="flex-1 px-3 py-1.5 text-xs text-slate-300 hover:text-white border border-slate-700 rounded">Cancel</button>
+                                                <button type="submit" disabled={totpBusy || totpCode.length !== 6} className="flex-1 px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center justify-center gap-1.5">
+                                                    {totpBusy && <Loader2 size={12} className="animate-spin" />} Confirm
+                                                </button>
+                                            </div>
+                                        </form>
+                                    )}
+
+                                    {authStatus.totpEnabled && !showTotpDisable && (
+                                        <button onClick={() => setShowTotpDisable(true)} className="mt-3 w-full px-3 py-1.5 text-xs border border-red-500/50 bg-red-500/10 hover:bg-red-500/20 text-red-300 rounded">
+                                            Disable 2FA
+                                        </button>
+                                    )}
+                                    {authStatus.totpEnabled && showTotpDisable && (
+                                        <form onSubmit={disableTotp} className="mt-3 space-y-2">
+                                            <input type="password" placeholder="Confirm your password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={totpDisablePassword} onChange={e => setTotpDisablePassword(e.target.value)} autoFocus required />
+                                            <div className="flex gap-2">
+                                                <button type="button" onClick={() => { setShowTotpDisable(false); setTotpDisablePassword(''); }} className="flex-1 px-3 py-1.5 text-xs text-slate-300 hover:text-white border border-slate-700 rounded">Cancel</button>
+                                                <button type="submit" disabled={totpBusy} className="flex-1 px-3 py-1.5 text-xs border border-red-500/50 bg-red-500/10 hover:bg-red-500/20 text-red-300 rounded flex items-center justify-center gap-1.5">
+                                                    {totpBusy && <Loader2 size={12} className="animate-spin" />} Disable
+                                                </button>
+                                            </div>
+                                        </form>
+                                    )}
+                                </div>
+
+                                <div className="bg-slate-950 border border-slate-700 rounded p-3 mt-3">
+                                    <label className="block text-sm text-slate-300">Log out after inactivity</label>
+                                    <p className="text-xs text-slate-500 mt-0.5">Minutes without mouse/keyboard activity on this page before you're signed out — closing the tab counts the same as going idle. 0 disables it.</p>
+                                    <div className="mt-2 flex gap-2">
+                                        <input
+                                            type="number"
+                                            min={0}
+                                            max={1440}
+                                            className="flex-1 bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500"
+                                            value={inactivityMinutes}
+                                            onChange={e => setInactivityMinutes(e.target.value)}
+                                        />
+                                        <button onClick={saveInactivityTimeout} disabled={inactivityBusy} className="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center gap-1.5">
+                                            {inactivityBusy && <Loader2 size={12} className="animate-spin" />} Save
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <div className="mt-6 flex justify-end">

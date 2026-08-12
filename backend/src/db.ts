@@ -65,6 +65,34 @@ export async function initDb() {
     if (!ec2Cols.some((c: any) => c.name === 'swap_keys')) {
         await db.exec(`ALTER TABLE ec2_settings ADD COLUMN swap_keys INTEGER NOT NULL DEFAULT 0`);
     }
+
+    // Single-user auth. `users` only ever holds one row — there's no
+    // multi-account support, just a first-run setup gate.
+    await db.exec(`
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            totp_secret TEXT,
+            totp_enabled INTEGER NOT NULL DEFAULT 0,
+            inactivity_timeout_minutes INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+    `);
+
+    // Sessions are looked up by the cookie value on every request, and pruned
+    // lazily (expired rows are deleted the next time they'd otherwise match).
+    // `last_active_at` is only touched by the frontend's activity heartbeat —
+    // NOT by every API call — so it reflects real mouse/keyboard use rather
+    // than background polling.
+    await db.exec(`
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            expires_at TEXT NOT NULL,
+            last_active_at TEXT NOT NULL
+        );
+    `);
 }
 
 function encrypt(text: string): string {
@@ -206,4 +234,83 @@ export async function upsertEc2Setting(
         'INSERT OR REPLACE INTO ec2_settings (instance_id, label, username, encrypted_password, os, swap_keys) VALUES (?, ?, ?, ?, ?, ?)',
         [id, label, username, encPass, os, swapKeys]
     );
+}
+
+// ---------------------------------------------------------------------------
+// Auth — single user, plus its sessions
+// ---------------------------------------------------------------------------
+
+export interface UserRow {
+    id: number;
+    username: string;
+    password_hash: string;
+    totp_secret: string | null;
+    totp_enabled: number;
+    inactivity_timeout_minutes: number;
+    created_at: string;
+}
+
+// There is only ever zero or one row in `users` — this doubles as the
+// first-run check (`getUser() === null` means setup hasn't happened yet).
+export async function getUser(): Promise<UserRow | null> {
+    const row = await db.get('SELECT * FROM users LIMIT 1');
+    return row || null;
+}
+
+export async function createUser(username: string, passwordHash: string): Promise<UserRow> {
+    await db.run(
+        'INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)',
+        [username, passwordHash, new Date().toISOString()]
+    );
+    return (await getUser())!;
+}
+
+export async function updateUserPassword(id: number, passwordHash: string) {
+    await db.run('UPDATE users SET password_hash = ? WHERE id = ?', [passwordHash, id]);
+}
+
+// Written on setup but not yet trusted — `totp_enabled` only flips on once
+// the user proves they scanned it correctly via verifySetup.
+export async function setPendingTotpSecret(id: number, secret: string) {
+    await db.run('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?', [secret, id]);
+}
+
+export async function enableTotp(id: number) {
+    await db.run('UPDATE users SET totp_enabled = 1 WHERE id = ?', [id]);
+}
+
+export async function disableTotp(id: number) {
+    await db.run('UPDATE users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?', [id]);
+}
+
+export async function setInactivityTimeout(id: number, minutes: number) {
+    await db.run('UPDATE users SET inactivity_timeout_minutes = ? WHERE id = ?', [minutes, id]);
+}
+
+export interface SessionRow {
+    id: string;
+    user_id: number;
+    expires_at: string;
+    last_active_at: string;
+}
+
+export async function createSession(id: string, userId: number, expiresAt: Date) {
+    const now = new Date().toISOString();
+    await db.run(
+        'INSERT INTO sessions (id, user_id, expires_at, last_active_at) VALUES (?, ?, ?, ?)',
+        [id, userId, expiresAt.toISOString(), now]
+    );
+}
+
+export async function getSession(id: string): Promise<SessionRow | null> {
+    const row = await db.get('SELECT * FROM sessions WHERE id = ?', [id]);
+    return row || null;
+}
+
+export async function touchSessionActivity(id: string) {
+    await db.run('UPDATE sessions SET last_active_at = ? WHERE id = ?', [new Date().toISOString(), id]);
+}
+
+export async function deleteSession(id: string) {
+    await db.run('DELETE FROM sessions WHERE id = ?', [id]);
 }

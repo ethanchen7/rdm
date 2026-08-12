@@ -69,8 +69,8 @@ Browser (React SPA)  ──WebSocket──►  Backend (Express + guacamole-lite
    backend needs Docker access (i.e. be in the `docker` group). Running guacd as
    a systemd unit instead? Set `GUACD_SERVICE_CMD="sudo -n systemctl"` in
    `backend/.env` and add a passwordless sudoers rule for those three commands.
-   Set `GUACD_SERVICE=` (blank) to remove the buttons. Note that anyone who can
-   reach the UI can use them — the app has no authentication of its own.
+   Set `GUACD_SERVICE=` (blank) to remove the buttons. The Start/Stop/Restart
+   buttons are only reachable once signed in — see [Authentication](#authentication).
 
 3. **Configure the backend**
    ```bash
@@ -155,6 +155,58 @@ nothing in the build needs to know it's mounted at `/rdm/`. Use
 
 > Pinning the API/WS to a fixed origin (e.g. a separate API host)? Set
 > `VITE_API_URL` / `VITE_WS_URL` at build time to override the derived paths.
+>
+> **Trusting `X-Forwarded-For`.** If you use [`TRUSTED_LAN_CIDRS`](#authentication)
+> below, it's checked against the raw TCP connection by default — which, behind
+> *any* reverse proxy, is always the proxy's own address (e.g. `127.0.0.1` for
+> one on the same host), never the real client IP. Fixing that takes two
+> changes together: (1) have the proxy forward the true client address in
+> `X-Forwarded-For`, and (2) set `TRUST_PROXY` in `backend/.env` (e.g.
+> `TRUST_PROXY=loopback` for a proxy on the same host) so the backend actually
+> trusts that header coming from the proxy. For nginx, (1) is
+> `proxy_set_header X-Forwarded-For $remote_addr;` in the `location` block
+> above; Caddy and Traefik set it automatically; check your proxy's docs for
+> the equivalent otherwise. Do only one of the two and logins either all look
+> like they're from `127.0.0.1` (matches or misses your LAN ranges depending
+> on what's configured) or, if you set `TRUST_PROXY` without actually
+> forwarding a trustworthy header, become spoofable — a client could set its
+> own `X-Forwarded-For` and impersonate a LAN address. Only set `TRUST_PROXY`
+> once (1) is genuinely in place.
+
+## Authentication
+
+The app requires signing in — there's one account, created the first time you
+open it. Two independent pieces:
+
+- **Password.** Always required. Set up on first run; changeable afterwards
+  from **Settings → Security**.
+- **Optional TOTP 2FA** (Google Authenticator, Authy, or similar), enabled
+  from **Settings → Security** by scanning a QR code. When enabled, it's only
+  asked for on logins arriving from **outside the trusted LAN** — e.g. over a
+  WireGuard or Tailscale tunnel. Same-LAN logins always skip it, and if you
+  never enable it, no login anywhere ever asks for it.
+
+  "Trusted LAN" is `TRUSTED_LAN_CIDRS` in `backend/.env` — a comma-separated
+  list of CIDRs, e.g. `192.168.1.0/24,127.0.0.1/32`. It's checked against the
+  actual TCP source address, not `X-Forwarded-For` (see the reverse-proxy
+  note above if you're behind one). Left blank, nothing is trusted, so 2FA
+  (once enabled) is required from everywhere — the safe default. It's checked
+  by exact subnet, not "is this a private IP", because a WireGuard/Tailscale
+  interface commonly hands out addresses in RFC1918 ranges too — only you know
+  which private range is actually your physical LAN.
+
+  **Recovery:** if you lose the authenticator device, sign in from the LAN
+  (2FA is never asked for there) and disable/re-enroll from Settings. There
+  are no separate backup codes — the LAN itself is the recovery path.
+
+- **Auto-logout on inactivity**, also in Settings — signs you out after N
+  minutes with no mouse/keyboard activity on the page. Closing the tab counts
+  the same as going idle (there's no separate "grace period" for a closed
+  tab — the inactivity clock simply keeps running whether the page is open
+  and idle or closed). Set to `0` to disable.
+
+Session cookies last `SESSION_MAX_AGE_DAYS` (`backend/.env`, default 30) as a
+hard ceiling regardless of activity.
 
 ## Usage
 
@@ -236,4 +288,5 @@ Then run that tag instead of `guacamole/guacd` in step 2.
   manager before the browser sees them, so they can't be forwarded from the
   physical keyboard.
 - Secrets live in `backend/.env`, `backend/key.pem`, and `backend/rdm.sqlite`
-  (encrypted passwords) — keep them out of version control.
+  (encrypted instance passwords, plus the account's password hash and TOTP
+  secret) — keep them out of version control.
