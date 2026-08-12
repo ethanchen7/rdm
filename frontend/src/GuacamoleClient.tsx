@@ -181,29 +181,30 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
         const keyboard = new Guacamole.Keyboard(document);
         const pressedKeys = new Set<number>();
 
-        // Ctrl <-> Cmd/Meta keysyms (see guacamole-common-js's keysym table).
-        // Swapped in both directions so muscle-memory shortcuts land correctly
-        // on a macOS target regardless of which one was physically pressed.
-        // Browsers always report the physical Cmd/Win key as keysym Meta_L/R
-        // (0xFFE7/0xFFE8) — that's what guacamole-common-js's own keysym table
-        // maps the DOM "Meta" key to on every platform. But Apple's built-in
-        // VNC server (Screen Sharing) doesn't bind Command to that keysym; it
-        // listens for the X11 "Super" keysym (0xFFEB/0xFFEC) instead. So the
-        // outgoing side of this swap targets Super, not Meta — Meta is still
-        // accepted coming *in* (mapped back to Ctrl) in case some client ever
-        // sends it.
+        // Ctrl <-> Cmd keysyms, swapped in both directions so muscle-memory
+        // shortcuts land correctly on a macOS target regardless of which one
+        // was physically pressed. Apple's built-in VNC server (Screen
+        // Sharing) does not implement standard RFB keyboard handling — it
+        // does not honor the DOM/X11 "Meta"/"Super" keysyms a browser
+        // reports for the Cmd/Win key at all (confirmed empirically: Meta_L
+        // lands as Option, and the nominal RFB convention of Super_L for a
+        // Windows/Super key landed as Control *and* Command held at once).
+        // What actually works against Apple's server, also empirically
+        // confirmed and matching a community-verified workaround for the
+        // same non-compliance (see TigerVNC issue #18), is swapping the
+        // Control and Alt keysyms directly: sending Alt_L lands as Cmd, and
+        // sending Control_L lands as Ctrl. So this remaps the *physical*
+        // Ctrl/Alt keys into each other's keysyms rather than touching
+        // Meta/Super at all.
         const CTRL_L = 0xFFE3, CTRL_R = 0xFFE4;
-        const META_L = 0xFFE7, META_R = 0xFFE8;
-        const SUPER_L = 0xFFEB, SUPER_R = 0xFFEC;
+        const ALT_L = 0xFFE9, ALT_R = 0xFFEA;
         const remapKeysym = (keysym: number) => {
             if (!swapCtrlCmdRef.current) return keysym;
             switch (keysym) {
-                case CTRL_L: return SUPER_L;
-                case CTRL_R: return SUPER_R;
-                case SUPER_L:
-                case META_L: return CTRL_L;
-                case SUPER_R:
-                case META_R: return CTRL_R;
+                case CTRL_L: return ALT_L;
+                case CTRL_R: return ALT_R;
+                case ALT_L: return CTRL_L;
+                case ALT_R: return CTRL_R;
                 default: return keysym;
             }
         };
