@@ -8,6 +8,7 @@ interface Props {
     token: string;
     name: string;
     ip: string;
+    protocol?: 'rdp' | 'vnc';
     onDisconnect: () => void;
     // Reported when the session fails rather than being closed deliberately —
     // guacd down, the tunnel dropping, an RDP-level refusal. The pane goes away
@@ -26,7 +27,7 @@ interface Props {
     onClipboard: (text: string) => void;
 }
 
-export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
+export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, onDisconnect, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
     const rootRef = useRef<HTMLDivElement>(null);
     const headerRef = useRef<HTMLDivElement>(null);
     const displayRef = useRef<HTMLDivElement>(null);
@@ -198,6 +199,17 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, onDisconnect
 
         // Mouse setup
         const mouse = new Guacamole.Mouse(displayEl);
+        // guacamole-common-js turns each wheel event into up/down button
+        // clicks once accumulated scroll distance crosses this many pixels
+        // (default 53) — the RealVNC viewer exposes the identical concept as
+        // "ScrollWheelThreshold" under its Expert settings. macOS's built-in
+        // Screen Sharing VNC server scrolls a tiny fraction per click no
+        // matter which client drives it, so it needs a much lower threshold
+        // to feel normal; 1 is what worked for RealVNC users hitting the same
+        // thing. Windows VNC servers already scroll fine and aren't affected
+        // by this (it's VNC-only, RDP is untouched).
+        // @ts-ignore — missing from the (outdated) type defs, but present at runtime
+        if (protocol === 'vnc') mouse.scrollThreshold = 1;
         // @ts-ignore
         mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = (mouseState: any) => {
             const scale = display.getScale() || 1;
