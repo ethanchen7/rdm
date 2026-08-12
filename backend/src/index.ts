@@ -431,11 +431,15 @@ app.post('/api/connect', async (req, res) => {
                     // was set locally.
                     'disable-display-resize': 'true',
                     'color-depth': settings.colorDepth || '32',
-                    // Guacamole's VNC encoder otherwise auto-selects lossy
-                    // JPEG-style compression, which introduces slight color
-                    // quantization RDP's path doesn't have. Fine to trade the
-                    // bandwidth for exact color on a LAN/WireGuard session.
-                    'force-lossless': 'true'
+                    // Lossless (raw) encoding gives exact color but sends far
+                    // more data per frame than RDP's path ever does — over
+                    // anything less than a fast LAN it's the main source of
+                    // the "VNC is laggier than RDP" feel. Default to letting
+                    // guacd use its lossy JPEG-style tile compression instead;
+                    // 'vncLossless' opts back into exact color for those who
+                    // want it and have the bandwidth.
+                    'force-lossless': settings.vncLossless ? 'true' : 'false',
+                    ...(settings.vncLossless ? {} : { 'compress-level': '6', 'quality-level': '6' })
                 }
             }
         } : {

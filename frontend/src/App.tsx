@@ -402,7 +402,7 @@ function App() {
 
     // Settings Modal State
     const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
-    const [globalSettings, setGlobalSettings] = useState({ fontSmoothing: true, colorDepth: '32' });
+    const [globalSettings, setGlobalSettings] = useState({ fontSmoothing: true, colorDepth: '32', vncLossless: false });
 
     // guacd status + service control, shown in the settings modal.
     const [guacd, setGuacd] = useState<GuacdStatus | null>(null);
@@ -1312,6 +1312,7 @@ function App() {
                                         token={session.token}
                                         name={name}
                                         ip={ip}
+                                        protocol={custom?.protocol || 'rdp'}
                                         clipboard={sharedClipboard}
                                         onClipboard={publishClipboard}
                                         onDisconnect={() => disconnectInstance(session.instanceId)}
@@ -1847,6 +1848,17 @@ function App() {
                                     <option value="24">24-bit (High Color)</option>
                                     <option value="32">32-bit (True Color)</option>
                                 </select>
+                            </div>
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <label className="block text-sm text-slate-300">Lossless VNC Colors</label>
+                                    <p className="text-xs text-slate-500">Exact color on custom VNC connections, at the cost of speed. Off uses compressed (JPEG-like) tiles — much faster over anything less than a fast LAN.</p>
+                                </div>
+                                <input type="checkbox" checked={globalSettings.vncLossless} onChange={e => {
+                                    const newSet = {...globalSettings, vncLossless: e.target.checked};
+                                    setGlobalSettings(newSet);
+                                    localStorage.setItem('rdpm_settings', JSON.stringify(newSet));
+                                }} className="w-4 h-4" />
                             </div>
                         </div>
                         <div className="mt-6 flex justify-end">
