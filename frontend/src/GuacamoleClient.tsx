@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Maximize, Minimize, X, GripVertical } from 'lucide-react';
+import { Maximize, Minimize, RefreshCw, X, GripVertical } from 'lucide-react';
 import Guacamole from 'guacamole-common-js';
 import { writeDeviceClipboard } from './deviceClipboard';
 import { OS_ICONS } from './OsIcons';
@@ -16,6 +16,9 @@ interface Props {
     // (Ctrl) to land as Cmd on the Mac, and vice versa.
     swapCtrlCmd?: boolean;
     onDisconnect: () => void;
+    // Issues a fresh token for this same session (see refreshInstance in
+    // App.tsx). Optional so callers that don't support it can omit the button.
+    onRefresh?: () => void;
     // Reported when the session fails rather than being closed deliberately —
     // guacd down, the tunnel dropping, an RDP-level refusal. The pane goes away
     // either way, so without this the failure would be invisible.
@@ -33,7 +36,7 @@ interface Props {
     onClipboard: (text: string) => void;
 }
 
-export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os, swapCtrlCmd, onDisconnect, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
+export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os, swapCtrlCmd, onDisconnect, onRefresh, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
     const rootRef = useRef<HTMLDivElement>(null);
     const headerRef = useRef<HTMLDivElement>(null);
     const displayRef = useRef<HTMLDivElement>(null);
@@ -93,6 +96,13 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
 
     useEffect(() => {
         if (!displayRef.current) return;
+
+        // Set right before this effect's own teardown (token change, e.g. a
+        // refresh, or real unmount) so the state-5 handler below can tell "this
+        // client is being intentionally torn down" apart from "the remote
+        // closed the connection on us" and skip the redundant/incorrect
+        // onDisconnect() in the former case.
+        let cleanedUp = false;
 
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         // Derive from the current mount path so it works both standalone ('/ws')
@@ -157,6 +167,11 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
                     break;
                 case 5:
                     setStatus('Disconnected');
+                    // This client is being torn down on purpose (token changed
+                    // or the pane unmounted) rather than dropped by the remote
+                    // — the disconnect is already accounted for, so don't tell
+                    // the parent again.
+                    if (cleanedUp) break;
                     // Dropped before it ever came up, with no error to explain
                     // it: the tunnel closed on us.
                     if (!wasConnected.current && !failed.current) {
@@ -307,6 +322,7 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
         document.addEventListener('fullscreenchange', handleFullscreenChange);
 
         return () => {
+            cleanedUp = true;
             document.removeEventListener('fullscreenchange', handleFullscreenChange);
             focusTarget.removeEventListener('blur', handleFocusLoss);
             window.removeEventListener('blur', handleFocusLoss);
@@ -368,8 +384,10 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
             style={box ? { width: box.w } : { width: '100%', height: '100%' }}
             onClick={() => displayRef.current?.focus()}
         >
-            {/* Static header above the session */}
-            <div ref={headerRef} className="bg-slate-800 border-b border-slate-700 p-2 text-white flex justify-between items-center shrink-0 z-10">
+            {/* Static header above the session. Controls only reveal on hover
+                of the bar itself (not the whole card) so a live desktop isn't
+                permanently overlaid with buttons. */}
+            <div ref={headerRef} className="group/bar bg-slate-800 border-b border-slate-700 px-2 py-1 text-white flex justify-between items-center shrink-0 z-10">
                 <span className="flex items-center gap-1.5 truncate">
                     <span
                         draggable
@@ -385,9 +403,14 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
                         const OsIcon = OS_ICONS[os];
                         return <OsIcon size={14} className="text-slate-500 shrink-0" />;
                     })()}
-                    <span className="font-semibold text-sm truncate">{name} {ip && <span className="opacity-60 font-mono text-xs ml-1">({ip})</span>}</span>
+                    <span className="font-semibold text-sm truncate">{name} {ip && <span className="opacity-60 font-mono text-xs ml-1">{ip}</span>}</span>
                 </span>
-                <div className="flex gap-4 items-center shrink-0 ml-4">
+                <div className="flex gap-4 items-center shrink-0 ml-4 opacity-0 group-hover/bar:opacity-100 transition-opacity">
+                    {onRefresh && (
+                        <button onClick={(e) => { e.stopPropagation(); onRefresh(); }} className="text-slate-300 hover:text-white transition-colors" title="Refresh session">
+                            <RefreshCw size={16} />
+                        </button>
+                    )}
                     <button onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }} className="text-slate-300 hover:text-white transition-colors" title="Fullscreen">
                         {isFullscreen ? <Minimize size={16} /> : <Maximize size={16} />}
                     </button>

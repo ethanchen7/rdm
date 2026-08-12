@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { Grid, LayoutGrid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check, Cpu } from 'lucide-react';
 import { GuacamoleClient } from './GuacamoleClient';
 import { useDeviceClipboard } from './deviceClipboard';
@@ -305,6 +305,53 @@ function App() {
     // Transient notifications (connection failures, etc.).
     const [toasts, setToasts] = useState<Toast[]>([]);
     const [gridLayout, setGridLayout] = useState<number>(2); // 1 = 1x1, 2 = 2x2, 4 = 4x4
+    // FLIP-animate grid-layout switches: CSS can't reliably interpolate a
+    // reflow that changes grid-template-columns/rows (or swaps grid<->flex
+    // for horizontal scroll) — depending on direction and magnitude, browsers
+    // either skip the transition, snap partway through, or (for a big jump
+    // like going to single view) visibly lag the JS-computed 16:9 box behind
+    // the CSS-animated cell size. Measuring each cell's rect before/after and
+    // tweening a `transform` between them sidesteps all of that: transform is
+    // always interpolable, regardless of what layout changed underneath.
+    const gridCellRefs = useRef<Record<string, HTMLDivElement | null>>({});
+    const pendingFlipRects = useRef<Record<string, DOMRect> | null>(null);
+    const changeGridLayout = (next: number) => {
+        const rects: Record<string, DOMRect> = {};
+        for (const [id, el] of Object.entries(gridCellRefs.current)) {
+            if (el) rects[id] = el.getBoundingClientRect();
+        }
+        pendingFlipRects.current = rects;
+        setGridLayout(next);
+    };
+    useLayoutEffect(() => {
+        const before = pendingFlipRects.current;
+        pendingFlipRects.current = null;
+        if (!before) return;
+        for (const [id, el] of Object.entries(gridCellRefs.current)) {
+            const from = before[id];
+            if (!el || !from) continue; // newly-appeared cell — nothing to animate from
+            const to = el.getBoundingClientRect();
+            const dx = from.left - to.left;
+            const dy = from.top - to.top;
+            const sx = from.width / to.width;
+            const sy = from.height / to.height;
+            if (Math.abs(dx) < 1 && Math.abs(dy) < 1 && Math.abs(sx - 1) < 0.01 && Math.abs(sy - 1) < 0.01) continue;
+            el.style.transition = 'none';
+            el.style.transformOrigin = 'top left';
+            el.style.willChange = 'transform';
+            el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+            el.getBoundingClientRect(); // force the browser to register the "from" state
+            requestAnimationFrame(() => {
+                el.style.transition = 'transform 200ms ease-out';
+                el.style.transform = '';
+            });
+            el.addEventListener('transitionend', () => {
+                el.style.transition = '';
+                el.style.transformOrigin = '';
+                el.style.willChange = '';
+            }, { once: true });
+        }
+    }, [gridLayout]);
     const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(() => {
         const stored = localStorage.getItem('rdpm_sidebar');
         return stored !== null ? stored === 'true' : true;
@@ -656,6 +703,33 @@ function App() {
             pushToast(`Couldn't connect to ${label}: ${reason}`, 'error');
         } finally {
             setConnecting(prev => ({ ...prev, [instanceId]: false }));
+        }
+    };
+
+    // Re-issues a fresh token for an already-connected session and swaps it in,
+    // which makes GuacamoleClient tear down and re-establish its tunnel. Reuses
+    // /connect rather than a disconnect+connect cycle so it doesn't race
+    // connectInstance's "already active" guard, and is cheap: the SSM tunnel
+    // (if any) is already open and startSSMTunnel just hands back its port.
+    const refreshInstance = async (instanceId: string) => {
+        if (!activeSessions[instanceId]) return;
+        try {
+            const isCustom = instanceId.startsWith('custom-');
+            const body = isCustom ? { customId: instanceId, settings: globalSettings } : { instanceId, settings: globalSettings };
+            const res = await fetch(`${API_BASE}/connect`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (!res.ok) throw new Error(await readErrorMessage(res));
+            const data = await res.json();
+            setActiveSessions(prev => prev[instanceId] ? { ...prev, [instanceId]: { ...prev[instanceId], token: data.token } } : prev);
+        } catch (err: any) {
+            const reason = (err?.message || 'Unknown error').toString().trim();
+            const label = instances.find(i => i.id === instanceId)?.name
+                || customInstances.find(c => c.id === instanceId)?.name
+                || instanceId;
+            pushToast(`Couldn't refresh ${label}: ${reason}`, 'error');
         }
     };
 
@@ -1083,39 +1157,32 @@ function App() {
                     >
                         Disconnect All
                     </button>
-                    <button
-                        onClick={() => { fetchInstances(); fetchBilling(); }}
-                        disabled={loading}
-                        className="text-sm bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded flex items-center gap-2 transition-colors disabled:opacity-50 ml-2"
-                    >
-                        <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
-                    </button>
                 </div>
 
                 <div className="flex items-center gap-2 bg-slate-800 p-1 rounded-lg border border-slate-700">
                     <button
-                        onClick={() => setGridLayout(1)}
+                        onClick={() => changeGridLayout(1)}
                         className={`p-2 rounded transition-colors ${gridLayout === 1 ? 'bg-slate-700 text-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
                         title="Single View"
                     >
                         <Square size={20} />
                     </button>
                     <button
-                        onClick={() => setGridLayout(3)}
+                        onClick={() => changeGridLayout(3)}
                         className={`p-2 rounded transition-colors ${gridLayout === 3 ? 'bg-slate-700 text-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
                         title="Horizontal Scroll"
                     >
                         <GalleryHorizontalEnd size={20} />
                     </button>
                     <button
-                        onClick={() => setGridLayout(2)}
+                        onClick={() => changeGridLayout(2)}
                         className={`p-2 rounded transition-colors ${gridLayout === 2 ? 'bg-slate-700 text-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
                         title="2x2 Grid"
                     >
                         <Grid size={20} />
                     </button>
                     <button
-                        onClick={() => setGridLayout(4)}
+                        onClick={() => changeGridLayout(4)}
                         className={`p-2 rounded transition-colors ${gridLayout === 4 ? 'bg-slate-700 text-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
                         title="4x4 Grid"
                     >
@@ -1214,6 +1281,14 @@ function App() {
                             <div className="flex items-center justify-between px-2 pt-4 pb-2">
                                 <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">AWS EC2</span>
                                 <div className="flex items-center gap-1">
+                                    <button
+                                        onClick={() => { fetchInstances(); fetchBilling(); }}
+                                        disabled={loading}
+                                        title="Refresh"
+                                        className="p-1 rounded text-blue-400 hover:bg-blue-500/20 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                                    >
+                                        <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+                                    </button>
                                     <button
                                         onClick={() => startInstances(stoppedEc2Ids)}
                                         disabled={loading || stoppedEc2Ids.length === 0}
@@ -1333,10 +1408,11 @@ function App() {
                                 return (
                                 <div
                                     key={session.instanceId}
+                                    ref={(el) => { gridCellRefs.current[session.instanceId] = el; }}
                                     onDragOver={(e) => { if (dragId) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dragOverId !== session.instanceId) setDragOverId(session.instanceId); } }}
                                     onDragLeave={() => { if (dragOverId === session.instanceId) setDragOverId(null); }}
                                     onDrop={(e) => { e.preventDefault(); reorderSession(dragId, session.instanceId); setDragId(null); setDragOverId(null); }}
-                                    className={`flex items-center justify-center min-h-[240px] min-w-0 rounded-lg transition-all duration-200 ease-out will-change-transform ${gridLayout === 3 ? 'min-w-full shrink-0 snap-center h-full' : ''} ${isDropTarget ? 'ring-2 ring-blue-400 ring-offset-2 ring-offset-black scale-[1.015]' : ''} ${dragId === session.instanceId ? 'opacity-40 scale-[0.97]' : ''}`}
+                                    className={`flex items-center justify-center min-h-[240px] min-w-0 rounded-lg transition-[opacity,transform,box-shadow] duration-150 ease-out ${gridLayout === 3 ? 'min-w-full shrink-0 snap-center h-full' : ''} ${isDropTarget ? 'ring-2 ring-blue-400 ring-offset-2 ring-offset-black scale-[1.015]' : ''} ${dragId === session.instanceId ? 'opacity-40 scale-[0.97]' : ''}`}
                                 >
                                     <GuacamoleClient
                                         instanceId={session.instanceId}
@@ -1349,6 +1425,7 @@ function App() {
                                         clipboard={sharedClipboard}
                                         onClipboard={publishClipboard}
                                         onDisconnect={() => disconnectInstance(session.instanceId)}
+                                        onRefresh={() => refreshInstance(session.instanceId)}
                                         onError={(message) => reportSessionError(session.instanceId, message)}
                                         onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
                                         onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
