@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Grid, LayoutGrid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check, Cpu } from 'lucide-react';
 import { GuacamoleClient } from './GuacamoleClient';
 import { useDeviceClipboard } from './deviceClipboard';
+import { OS_ICONS } from './OsIcons';
 import './index.css';
 
 let toastSeq = 0;
@@ -29,6 +30,7 @@ interface EC2Instance {
     label?: string;
     username?: string;
     hasPassword?: boolean;
+    os?: '' | 'windows' | 'macos' | 'linux';
 }
 
 // One entry of the region's instance-type catalogue (backend /api/instance-types).
@@ -113,6 +115,14 @@ const SortArrow = ({ active, dir }: { active: boolean; dir: 'asc' | 'desc' }) =>
         ? (dir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />)
         : <ArrowUpDown size={11} className="opacity-30" />;
 
+// Small flat glyph shown next to an instance once its OS is set (see OsIcons.tsx).
+const OsIcon = ({ os, size = 13, className = '' }: { os?: string; size?: number; className?: string }) => {
+    if (!os || !OS_ICONS[os]) return null;
+    const Icon = OS_ICONS[os];
+    const label = os === 'macos' ? 'macOS' : os === 'windows' ? 'Windows' : 'Linux';
+    return <Icon size={size} className={className} aria-label={label} />;
+};
+
 interface ActiveSession {
     instanceId: string;
     token: string;
@@ -127,6 +137,7 @@ interface CustomInstance {
     username: string;
     protocol?: 'rdp' | 'vnc';
     hasPassword?: boolean;
+    os?: '' | 'windows' | 'macos' | 'linux';
 }
 
 interface Billing {
@@ -332,6 +343,7 @@ function App() {
     const [instanceModal, setInstanceModal] = useState<InstanceModal | null>(null);
     const [instanceForm, setInstanceForm] = useState({
         name: '', ip: '', username: 'Administrator', protocol: 'rdp' as 'rdp' | 'vnc',
+        os: '' as '' | 'windows' | 'macos' | 'linux',
         password: '', changePassword: false, hasPassword: false
     });
 
@@ -647,12 +659,12 @@ function App() {
 
     // Open the add/edit modal, prefilled for the target.
     const openAddModal = () => {
-        setInstanceForm({ name: '', ip: '', username: 'Administrator', protocol: 'rdp', password: '', changePassword: true, hasPassword: false });
+        setInstanceForm({ name: '', ip: '', username: 'Administrator', protocol: 'rdp', os: '', password: '', changePassword: true, hasPassword: false });
         setInstanceModal({ mode: 'add' });
     };
 
     const openEditCustom = (inst: CustomInstance) => {
-        setInstanceForm({ name: inst.name, ip: inst.ip, username: inst.username || 'Administrator', protocol: inst.protocol || 'rdp', password: '', changePassword: false, hasPassword: !!inst.hasPassword });
+        setInstanceForm({ name: inst.name, ip: inst.ip, username: inst.username || 'Administrator', protocol: inst.protocol || 'rdp', os: inst.os || '', password: '', changePassword: false, hasPassword: !!inst.hasPassword });
         setInstanceModal({ mode: 'edit-custom', id: inst.id });
     };
 
@@ -662,6 +674,7 @@ function App() {
             ip: inst.publicIp || inst.privateIp || '',
             username: inst.username || 'Administrator',
             protocol: 'rdp',
+            os: inst.os || '',
             password: '', changePassword: false, hasPassword: !!inst.hasPassword
         });
         setInstanceModal({ mode: 'edit-ec2', id: inst.id });
@@ -811,19 +824,19 @@ function App() {
                 await fetch(`${API_BASE}/custom-instances`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ id: 'custom-' + Date.now(), name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, password: f.password })
+                    body: JSON.stringify({ id: 'custom-' + Date.now(), name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, os: f.os, password: f.password })
                 });
             } else if (instanceModal.mode === 'edit-custom') {
                 await fetch(`${API_BASE}/custom-instances/${instanceModal.id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, changePassword: f.changePassword, password: f.password })
+                    body: JSON.stringify({ name: f.name, ip: f.ip, username: f.username, protocol: f.protocol, os: f.os, changePassword: f.changePassword, password: f.password })
                 });
             } else if (instanceModal.mode === 'edit-ec2') {
                 await fetch(`${API_BASE}/ec2-settings/${instanceModal.id}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ label: f.name, username: f.username, changePassword: f.changePassword, password: f.password })
+                    body: JSON.stringify({ label: f.name, username: f.username, os: f.os, changePassword: f.changePassword, password: f.password })
                 });
             }
             await Promise.all([fetchCustomInstances(), fetchInstances()]);
@@ -1168,9 +1181,16 @@ function App() {
                                             </div>
                                             <span className="text-xs opacity-60 truncate font-mono mt-0.5 ml-4">{inst.ip}</span>
                                         </div>
-                                        <div className="flex items-center gap-1 shrink-0">
-                                            <button onClick={() => openEditCustom(inst)} title="Instance Settings" className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-white p-1"><Settings size={14}/></button>
-                                            <button onClick={() => confirmDeleteCustom(inst)} title="Remove" className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-300 p-1"><X size={14}/></button>
+                                        <div className="relative shrink-0">
+                                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <button onClick={() => openEditCustom(inst)} title="Instance Settings" className="text-slate-400 hover:text-white p-1"><Settings size={14}/></button>
+                                                <button onClick={() => confirmDeleteCustom(inst)} title="Remove" className="text-red-400 hover:text-red-300 p-1"><X size={14}/></button>
+                                            </div>
+                                            {inst.os && (
+                                                <span className="absolute inset-0 flex items-center justify-end text-slate-500 group-hover:opacity-0 transition-opacity pointer-events-none">
+                                                    <OsIcon os={inst.os} />
+                                                </span>
+                                            )}
                                         </div>
                                     </div>
                                     <div className="flex items-center justify-end">
@@ -1233,7 +1253,14 @@ function App() {
                                             </div>
                                             <span className="text-xs opacity-60 truncate font-mono mt-0.5 ml-4">{inst.id}</span>
                                         </div>
-                                        <button onClick={() => openEditEc2(inst)} title="Instance Settings" className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-white p-1 shrink-0"><Settings size={14}/></button>
+                                        <div className="relative shrink-0">
+                                            <button onClick={() => openEditEc2(inst)} title="Instance Settings" className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-white p-1 transition-opacity"><Settings size={14}/></button>
+                                            {inst.os && (
+                                                <span className="absolute inset-0 flex items-center justify-center text-slate-500 group-hover:opacity-0 transition-opacity pointer-events-none">
+                                                    <OsIcon os={inst.os} />
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
                                     <div className="flex items-center justify-between ml-4">
                                         <div className="flex gap-2">
@@ -1298,6 +1325,7 @@ function App() {
                                 const ec2 = instances.find(i => i.id === session.instanceId);
                                 const name = custom?.name || ec2?.label || ec2?.name || session.name;
                                 const ip = custom?.ip || ec2?.publicIp || ec2?.privateIp || session.ip;
+                                const os = custom?.os || ec2?.os || '';
                                 const isDropTarget = dragOverId === session.instanceId && dragId !== session.instanceId;
                                 return (
                                 <div
@@ -1313,6 +1341,7 @@ function App() {
                                         name={name}
                                         ip={ip}
                                         protocol={custom?.protocol || 'rdp'}
+                                        os={os}
                                         clipboard={sharedClipboard}
                                         onClipboard={publishClipboard}
                                         onDisconnect={() => disconnectInstance(session.instanceId)}
@@ -1382,6 +1411,19 @@ function App() {
                                     )}
                                 </div>
                             )}
+                            <div>
+                                <label className="block text-xs text-slate-400 mb-1">Operating System</label>
+                                <select
+                                    className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white outline-none focus:border-blue-500"
+                                    value={instanceForm.os}
+                                    onChange={e => setInstanceForm({...instanceForm, os: e.target.value as '' | 'windows' | 'macos' | 'linux'})}
+                                >
+                                    <option value="">None</option>
+                                    <option value="windows">Windows</option>
+                                    <option value="macos">macOS</option>
+                                    <option value="linux">Linux</option>
+                                </select>
+                            </div>
                             {ec2Inst && (
                                 <div>
                                     <label className="block text-xs text-slate-400 mb-1">Instance Type</label>

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Maximize, Minimize, X, GripVertical } from 'lucide-react';
 import Guacamole from 'guacamole-common-js';
 import { writeDeviceClipboard } from './deviceClipboard';
+import { OS_ICONS } from './OsIcons';
 
 interface Props {
     instanceId: string;
@@ -9,6 +10,7 @@ interface Props {
     name: string;
     ip: string;
     protocol?: 'rdp' | 'vnc';
+    os?: '' | 'windows' | 'macos' | 'linux';
     onDisconnect: () => void;
     // Reported when the session fails rather than being closed deliberately —
     // guacd down, the tunnel dropping, an RDP-level refusal. The pane goes away
@@ -27,7 +29,7 @@ interface Props {
     onClipboard: (text: string) => void;
 }
 
-export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, onDisconnect, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
+export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os, onDisconnect, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
     const rootRef = useRef<HTMLDivElement>(null);
     const headerRef = useRef<HTMLDivElement>(null);
     const displayRef = useRef<HTMLDivElement>(null);
@@ -337,6 +339,10 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, on
                     >
                         <GripVertical size={16} />
                     </span>
+                    {os && OS_ICONS[os] && (() => {
+                        const OsIcon = OS_ICONS[os];
+                        return <OsIcon size={14} className="text-slate-500 shrink-0" />;
+                    })()}
                     <span className="font-semibold text-sm truncate">{name} {ip && <span className="opacity-60 font-mono text-xs ml-1">({ip})</span>}</span>
                 </span>
                 <div className="flex gap-4 items-center shrink-0 ml-4">

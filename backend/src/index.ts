@@ -88,6 +88,7 @@ app.get('/api/instances', async (req, res) => {
                     label: ov?.label || '',
                     username: ov?.username || '',
                     hasPassword: ov?.hasPassword || false,
+                    os: ov?.os || '',
                     state: instance.State?.Name,
                     // Hardware size (e.g. 'c5a.xlarge'), changeable from the
                     // instance settings modal while the instance is stopped.
@@ -295,8 +296,8 @@ app.get('/api/custom-instances', async (req, res) => {
 
 app.post('/api/custom-instances', async (req, res) => {
     try {
-        const { id, name, ip, username, password, protocol } = req.body;
-        await addCustomInstance(id, name, ip, username, password, protocol || 'rdp');
+        const { id, name, ip, username, password, protocol, os } = req.body;
+        await addCustomInstance(id, name, ip, username, password, protocol || 'rdp', os || '');
         res.json({ success: true });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
@@ -305,8 +306,8 @@ app.post('/api/custom-instances', async (req, res) => {
 
 app.put('/api/custom-instances/:id', async (req, res) => {
     try {
-        const { name, ip, username, protocol, changePassword, password } = req.body;
-        await updateCustomInstance(req.params.id, { name, ip, username, protocol: protocol || 'rdp', changePassword, password });
+        const { name, ip, username, protocol, os, changePassword, password } = req.body;
+        await updateCustomInstance(req.params.id, { name, ip, username, protocol: protocol || 'rdp', os: os || '', changePassword, password });
         res.json({ success: true });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
@@ -326,8 +327,8 @@ app.delete('/api/custom-instances/:id', async (req, res) => {
 // Leaving the password blank means "use key.pem / RDP_PASSWORD" at connect time.
 app.put('/api/ec2-settings/:id', async (req, res) => {
     try {
-        const { label, username, changePassword, password } = req.body;
-        await upsertEc2Setting(req.params.id, { label, username, changePassword, password });
+        const { label, username, os, changePassword, password } = req.body;
+        await upsertEc2Setting(req.params.id, { label, username, os, changePassword, password });
         res.json({ success: true });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
