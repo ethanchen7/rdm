@@ -2131,15 +2131,21 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                     </button>
                                 </div>
 
-                                <form onSubmit={changePassword} className="bg-slate-950 border border-slate-700 rounded p-3 mt-3 space-y-2">
-                                    <p className="text-sm text-slate-300">Change password</p>
-                                    <input type="password" placeholder="Current password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={pwCurrent} onChange={e => setPwCurrent(e.target.value)} required />
-                                    <input type="password" placeholder="New password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={pwNew} onChange={e => setPwNew(e.target.value)} minLength={8} required />
-                                    <input type="password" placeholder="Confirm new password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} minLength={8} required />
-                                    <button type="submit" disabled={pwBusy || !pwCurrent || !pwNew} className="w-full px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center justify-center gap-1.5">
-                                        {pwBusy && <Loader2 size={12} className="animate-spin" />} Update password
-                                    </button>
-                                </form>
+                                <div className="bg-slate-950 border border-slate-700 rounded p-3 mt-3">
+                                    <p className="text-sm text-slate-300 mb-2">Change password</p>
+                                    {authStatus.onLan === false ? (
+                                        <p className="text-xs text-amber-400/80">Only available from the trusted LAN.</p>
+                                    ) : (
+                                        <form onSubmit={changePassword} className="space-y-2">
+                                            <input type="password" placeholder="Current password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={pwCurrent} onChange={e => setPwCurrent(e.target.value)} required />
+                                            <input type="password" placeholder="New password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={pwNew} onChange={e => setPwNew(e.target.value)} minLength={8} required />
+                                            <input type="password" placeholder="Confirm new password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} minLength={8} required />
+                                            <button type="submit" disabled={pwBusy || !pwCurrent || !pwNew} className="w-full px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center justify-center gap-1.5">
+                                                {pwBusy && <Loader2 size={12} className="animate-spin" />} Update password
+                                            </button>
+                                        </form>
+                                    )}
+                                </div>
 
                                 <div className="bg-slate-950 border border-slate-700 rounded p-3 mt-3">
                                     <div className="flex items-center justify-between">
@@ -2153,52 +2159,58 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                         Only asked for when signing in from outside the trusted LAN (e.g. over a WireGuard/Tailscale tunnel) — same-LAN logins skip it.
                                     </p>
 
-                                    {!authStatus.totpEnabled && !totpSetup && (
-                                        <button onClick={startTotpSetup} disabled={totpBusy} className="mt-3 w-full px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center justify-center gap-1.5">
-                                            {totpBusy && <Loader2 size={12} className="animate-spin" />} Enable 2FA
-                                        </button>
-                                    )}
+                                    {authStatus.onLan === false ? (
+                                        <p className="text-xs text-amber-400/80 mt-3">Only available from the trusted LAN.</p>
+                                    ) : (
+                                        <>
+                                        {!authStatus.totpEnabled && !totpSetup && (
+                                            <button onClick={startTotpSetup} disabled={totpBusy} className="mt-3 w-full px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center justify-center gap-1.5">
+                                                {totpBusy && <Loader2 size={12} className="animate-spin" />} Enable 2FA
+                                            </button>
+                                        )}
 
-                                    {totpSetup && (
-                                        <form onSubmit={confirmTotpSetup} className="mt-3 space-y-2">
-                                            <img src={totpSetup.qr} alt="2FA QR code" className="mx-auto rounded border border-slate-700 bg-white p-1" width={160} height={160} />
-                                            <p className="text-xs text-slate-500 text-center break-all">
-                                                Scan with your authenticator app, or enter manually: <code className="text-slate-400">{totpSetup.secret}</code>
-                                            </p>
-                                            <input
-                                                className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white text-center tracking-[0.3em] outline-none focus:border-blue-500"
-                                                value={totpCode}
-                                                onChange={e => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                                                inputMode="numeric"
-                                                maxLength={6}
-                                                placeholder="6-digit code"
-                                                autoFocus
-                                                required
-                                            />
-                                            <div className="flex gap-2">
-                                                <button type="button" onClick={() => { setTotpSetup(null); setTotpCode(''); }} className="flex-1 px-3 py-1.5 text-xs text-slate-300 hover:text-white border border-slate-700 rounded">Cancel</button>
-                                                <button type="submit" disabled={totpBusy || totpCode.length !== 6} className="flex-1 px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center justify-center gap-1.5">
-                                                    {totpBusy && <Loader2 size={12} className="animate-spin" />} Confirm
-                                                </button>
-                                            </div>
-                                        </form>
-                                    )}
+                                        {totpSetup && (
+                                            <form onSubmit={confirmTotpSetup} className="mt-3 space-y-2">
+                                                <img src={totpSetup.qr} alt="2FA QR code" className="mx-auto rounded border border-slate-700 bg-white p-1" width={160} height={160} />
+                                                <p className="text-xs text-slate-500 text-center break-all">
+                                                    Scan with your authenticator app, or enter manually: <code className="text-slate-400">{totpSetup.secret}</code>
+                                                </p>
+                                                <input
+                                                    className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white text-center tracking-[0.3em] outline-none focus:border-blue-500"
+                                                    value={totpCode}
+                                                    onChange={e => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                                                    inputMode="numeric"
+                                                    maxLength={6}
+                                                    placeholder="6-digit code"
+                                                    autoFocus
+                                                    required
+                                                />
+                                                <div className="flex gap-2">
+                                                    <button type="button" onClick={() => { setTotpSetup(null); setTotpCode(''); }} className="flex-1 px-3 py-1.5 text-xs text-slate-300 hover:text-white border border-slate-700 rounded">Cancel</button>
+                                                    <button type="submit" disabled={totpBusy || totpCode.length !== 6} className="flex-1 px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded flex items-center justify-center gap-1.5">
+                                                        {totpBusy && <Loader2 size={12} className="animate-spin" />} Confirm
+                                                    </button>
+                                                </div>
+                                            </form>
+                                        )}
 
-                                    {authStatus.totpEnabled && !showTotpDisable && (
-                                        <button onClick={() => setShowTotpDisable(true)} className="mt-3 w-full px-3 py-1.5 text-xs border border-red-500/50 bg-red-500/10 hover:bg-red-500/20 text-red-300 rounded">
-                                            Disable 2FA
-                                        </button>
-                                    )}
-                                    {authStatus.totpEnabled && showTotpDisable && (
-                                        <form onSubmit={disableTotp} className="mt-3 space-y-2">
-                                            <input type="password" placeholder="Confirm your password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={totpDisablePassword} onChange={e => setTotpDisablePassword(e.target.value)} autoFocus required />
-                                            <div className="flex gap-2">
-                                                <button type="button" onClick={() => { setShowTotpDisable(false); setTotpDisablePassword(''); }} className="flex-1 px-3 py-1.5 text-xs text-slate-300 hover:text-white border border-slate-700 rounded">Cancel</button>
-                                                <button type="submit" disabled={totpBusy} className="flex-1 px-3 py-1.5 text-xs border border-red-500/50 bg-red-500/10 hover:bg-red-500/20 text-red-300 rounded flex items-center justify-center gap-1.5">
-                                                    {totpBusy && <Loader2 size={12} className="animate-spin" />} Disable
-                                                </button>
-                                            </div>
-                                        </form>
+                                        {authStatus.totpEnabled && !showTotpDisable && (
+                                            <button onClick={() => setShowTotpDisable(true)} className="mt-3 w-full px-3 py-1.5 text-xs border border-red-500/50 bg-red-500/10 hover:bg-red-500/20 text-red-300 rounded">
+                                                Disable 2FA
+                                            </button>
+                                        )}
+                                        {authStatus.totpEnabled && showTotpDisable && (
+                                            <form onSubmit={disableTotp} className="mt-3 space-y-2">
+                                                <input type="password" placeholder="Confirm your password" className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-sm text-white outline-none focus:border-blue-500" value={totpDisablePassword} onChange={e => setTotpDisablePassword(e.target.value)} autoFocus required />
+                                                <div className="flex gap-2">
+                                                    <button type="button" onClick={() => { setShowTotpDisable(false); setTotpDisablePassword(''); }} className="flex-1 px-3 py-1.5 text-xs text-slate-300 hover:text-white border border-slate-700 rounded">Cancel</button>
+                                                    <button type="submit" disabled={totpBusy} className="flex-1 px-3 py-1.5 text-xs border border-red-500/50 bg-red-500/10 hover:bg-red-500/20 text-red-300 rounded flex items-center justify-center gap-1.5">
+                                                        {totpBusy && <Loader2 size={12} className="animate-spin" />} Disable
+                                                    </button>
+                                                </div>
+                                            </form>
+                                        )}
+                                        </>
                                     )}
                                 </div>
 

@@ -88,6 +88,19 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     next();
 }
 
+// Applied on top of requireAuth for credential-changing routes (password,
+// TOTP enroll/disable) — these are locked to the trusted LAN regardless of
+// whether the current session itself was established with 2FA. Rationale:
+// a session reached over an untrusted network (tunnel) shouldn't be able to
+// weaken or rotate the account's own credentials from out there, even if
+// that session is otherwise fully authenticated.
+function requireTrustedSource(req: Request, res: Response, next: NextFunction) {
+    if (!isTrustedSource(req)) {
+        return res.status(403).json({ error: 'This action is only available from the trusted LAN.' });
+    }
+    next();
+}
+
 export const authRouter = Router();
 
 authRouter.get('/status', async (req, res) => {
@@ -117,7 +130,11 @@ authRouter.get('/status', async (req, res) => {
             authenticated,
             username: authenticated ? user.username : undefined,
             totpEnabled: authenticated ? !!user.totp_enabled : undefined,
-            inactivityTimeoutMinutes: authenticated ? user.inactivity_timeout_minutes : undefined
+            inactivityTimeoutMinutes: authenticated ? user.inactivity_timeout_minutes : undefined,
+            // Drives whether Settings shows the password/2FA controls as
+            // usable or locked — see requireTrustedSource, which is the
+            // actual enforcement; this is just so the UI can match it.
+            onLan: authenticated ? isTrustedSource(req) : undefined
         });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
@@ -222,7 +239,7 @@ authRouter.post('/heartbeat', requireAuth, async (req, res) => {
     res.json({ success: true });
 });
 
-authRouter.post('/password', requireAuth, async (req, res) => {
+authRouter.post('/password', requireAuth, requireTrustedSource, async (req, res) => {
     try {
         const user = await getUser();
         if (!user) return res.status(401).json({ error: 'Not authenticated' });
@@ -242,7 +259,7 @@ authRouter.post('/password', requireAuth, async (req, res) => {
     }
 });
 
-authRouter.post('/totp/setup', requireAuth, async (req, res) => {
+authRouter.post('/totp/setup', requireAuth, requireTrustedSource, async (req, res) => {
     try {
         const user = await getUser();
         if (!user) return res.status(401).json({ error: 'Not authenticated' });
@@ -258,7 +275,7 @@ authRouter.post('/totp/setup', requireAuth, async (req, res) => {
     }
 });
 
-authRouter.post('/totp/verify-setup', requireAuth, async (req, res) => {
+authRouter.post('/totp/verify-setup', requireAuth, requireTrustedSource, async (req, res) => {
     try {
         const user = await getUser();
         if (!user || !user.totp_secret) {
@@ -275,7 +292,7 @@ authRouter.post('/totp/verify-setup', requireAuth, async (req, res) => {
     }
 });
 
-authRouter.post('/totp/disable', requireAuth, async (req, res) => {
+authRouter.post('/totp/disable', requireAuth, requireTrustedSource, async (req, res) => {
     try {
         const user = await getUser();
         if (!user) return res.status(401).json({ error: 'Not authenticated' });

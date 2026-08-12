@@ -20,6 +20,11 @@ export interface AuthStatus {
     username?: string;
     totpEnabled?: boolean;
     inactivityTimeoutMinutes?: number;
+    // Whether *this* session's current request is arriving from the trusted
+    // LAN (see TRUSTED_LAN_CIDRS) — password/2FA changes are locked to it
+    // server-side (see requireTrustedSource in auth.ts); this just lets the
+    // UI match that instead of letting the user hit a 403.
+    onLan?: boolean;
 }
 
 // How often a real mouse/keyboard event (while one has happened recently)
