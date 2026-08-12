@@ -2,7 +2,7 @@
   "type": "service",
   "port": 3010,
   "start": "npm run start:backend",
-  "title": "RDPm",
-  "description": "RDPm — browser-based RDP access to EC2 instances via Guacamole",
+  "title": "RDm",
+  "description": "RDm — browser-based RDP/VNC access to EC2 (and custom) machines via Guacamole",
   "force_https": true
 }

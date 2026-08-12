@@ -174,7 +174,7 @@ interface ConfirmState {
     onConfirm: () => void;
 }
 
-// Mount point the app is served from — '/' standalone, or '/rdpm/' (etc.)
+// Mount point the app is served from — '/' standalone, or '/rdm/' (etc.)
 // behind a path-stripping reverse proxy. Derived from the page URL so no build
 // step is tied to a specific prefix. `VITE_API_URL` still overrides if set.
 const MOUNT_PATH = window.location.pathname.replace(/[^/]*$/, '');
@@ -1141,7 +1141,7 @@ function App() {
                         {isSidebarVisible ? <PanelLeftClose size={24} /> : <PanelLeftOpen size={24} />}
                     </button>
                     <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent">
-                        RDPm <span className="text-sm text-slate-500 ml-2 font-normal">RDP Manager</span>
+                        RDm
                     </h1>
                     <button
                         onClick={connectAll}
@@ -1386,9 +1386,6 @@ function App() {
                         <div className="h-full flex flex-col items-center justify-center text-slate-500">
                             <Maximize size={48} className="mb-4 opacity-20" />
                             <p className="text-lg">Select an instance to start a session</p>
-                            <p className="text-sm mt-2 max-w-md text-center opacity-70">
-                                This will automatically tunnel RDP over AWS Systems Manager (SSM) and stream the desktop securely to your browser.
-                            </p>
                         </div>
                     ) : (
                         <div className={`gap-4 h-full ${getGridClass()}`}>

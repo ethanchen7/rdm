@@ -13,7 +13,7 @@ export let db: any = null;
 
 export async function initDb() {
     db = await open({
-        filename: path.join(__dirname, '..', 'rdpm.sqlite'),
+        filename: path.join(__dirname, '..', 'rdm.sqlite'),
         driver: sqlite3.Database
     });
 

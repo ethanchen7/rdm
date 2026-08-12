@@ -41,7 +41,7 @@ if (TLS_CERT && TLS_KEY) {
     server = http.createServer(app);
 }
 
-// Built by `npm run build` in ../frontend; nginx proxies /rdpm/ straight to
+// Built by `npm run build` in ../frontend; nginx proxies /rdm/ straight to
 // this service (see ../../deploy.json), so the SPA is served from here too.
 const FRONTEND_DIST = path.join(__dirname, '..', '..', 'frontend', 'dist');
 

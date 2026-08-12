@@ -1,5 +1,5 @@
 {
-  "name": "rdpm",
+  "name": "rdm",
   "version": "1.0.0",
   "scripts": {
     "start:backend": "cd backend && npx ts-node src/index.ts",

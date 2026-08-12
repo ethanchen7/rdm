@@ -106,7 +106,7 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, protocol, os
 
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         // Derive from the current mount path so it works both standalone ('/ws')
-        // and behind a stripped prefix ('/rdpm/ws' -> '/ws'). VITE_WS_URL overrides.
+        // and behind a stripped prefix ('/rdm/ws' -> '/ws'). VITE_WS_URL overrides.
         const mountPath = window.location.pathname.replace(/[^/]*$/, '');
         const wsBase = import.meta.env.VITE_WS_URL || `${wsProtocol}//${window.location.host}${mountPath}ws`;
         const tunnel = new Guacamole.WebSocketTunnel(wsBase);

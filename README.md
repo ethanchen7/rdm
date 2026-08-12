@@ -1,14 +1,15 @@
-# RDPm — RDP Manager
+# RDm — Remote Desktop Manager
 
-Browser-based RDP access to your AWS EC2 (and custom) machines, streamed to the
-browser via [Apache Guacamole](https://guacamole.apache.org/). Manage many
-Windows instances from one page: start/stop EC2, connect several at once in a
-grid, share the clipboard across sessions, and see your month-to-date AWS spend.
+Browser-based RDP and VNC access to your AWS EC2 (and custom) machines,
+streamed to the browser via [Apache Guacamole](https://guacamole.apache.org/).
+Manage many instances from one page: start/stop EC2, connect several at once
+in a grid, share the clipboard across sessions, and see your month-to-date
+AWS spend.
 
 ## How it works
 
 ```
-Browser (React SPA)  ──WebSocket──►  Backend (Express + guacamole-lite)  ──►  guacd (Docker)  ──RDP──►  EC2 / Windows host
+Browser (React SPA)  ──WebSocket──►  Backend (Express + guacamole-lite)  ──►  guacd (Docker)  ──RDP/VNC──►  EC2 / custom host
         │                                     │
         └── REST /api/* ─────────────────────►┴── AWS SDK (EC2 list/start/stop, password, Cost Explorer), optional SSM tunnel
 ```
@@ -16,7 +17,7 @@ Browser (React SPA)  ──WebSocket──►  Backend (Express + guacamole-lite
 - **frontend/** — React 19 + Vite + Tailwind single-page app. Built to `frontend/dist`.
 - **backend/** — Node/TypeScript Express server. Proxies the Guacamole WebSocket
   to `guacd`, exposes the REST API, and serves the built SPA. Stores custom
-  (non-EC2) connections in a local SQLite file (`backend/rdpm.sqlite`).
+  (non-EC2) RDP/VNC connections in a local SQLite file (`backend/rdm.sqlite`).
 - **guacd** — the Guacamole daemon, run as a Docker container, that actually
   speaks RDP. Listens on `127.0.0.1:4822` (hard-coded in `backend/src/index.ts`).
 
@@ -49,7 +50,7 @@ Browser (React SPA)  ──WebSocket──►  Backend (Express + guacamole-lite
 
 1. **Clone and install**
    ```bash
-   git clone <this-repo> rdpm && cd rdpm
+   git clone <this-repo> rdm && cd rdm
    npm install
    (cd backend && npm install)
    (cd frontend && npm install)
@@ -129,7 +130,7 @@ choice (`systemd`, `pm2`, `docker`, …) to run `npm run start:backend`.
 ### Behind a reverse proxy (optional)
 
 To host it at a path alongside other apps, point a proxy at the backend and strip
-the prefix. Example nginx serving it at `/rdpm/` over HTTPS:
+the prefix. Example nginx serving it at `/rdm/` over HTTPS:
 
 ```nginx
 server {
@@ -138,8 +139,8 @@ server {
     ssl_certificate     /etc/ssl/certs/your-host.crt;   # or a Let's Encrypt cert
     ssl_certificate_key /etc/ssl/private/your-host.key;
 
-    location /rdpm/ {
-        proxy_pass http://127.0.0.1:3010/;   # trailing slash strips the /rdpm prefix
+    location /rdm/ {
+        proxy_pass http://127.0.0.1:3010/;   # trailing slash strips the /rdm prefix
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;      # required for the WebSocket
         proxy_set_header Connection "upgrade";
@@ -149,7 +150,7 @@ server {
 ```
 
 The relative asset/API/WS paths resolve correctly through the stripped prefix, so
-nothing in the build needs to know it's mounted at `/rdpm/`. Use
+nothing in the build needs to know it's mounted at `/rdm/`. Use
 [Let's Encrypt](https://certbot.eff.org/) for a trusted cert on a public host.
 
 > Pinning the API/WS to a fixed origin (e.g. a separate API host)? Set
@@ -157,8 +158,9 @@ nothing in the build needs to know it's mounted at `/rdpm/`. Use
 
 ## Usage
 
-- **Sidebar** lists EC2 instances (green dot = running) and any custom RDP hosts
-  you add with the **+** button. Start/stop EC2 inline; **Connect** opens a session.
+- **Sidebar** lists EC2 instances (green dot = running) and any custom RDP or
+  VNC hosts you add with the **+** button. Start/stop EC2 inline; **Connect**
+  opens a session.
 - **Layouts** (top-right): single, horizontal scroll, 2×2, 4×4 grid. Sessions
   render at a fixed 1920×1080 and fill each 16:9 pane.
 - **Click a pane** to control it — the focused pane gets a **yellow** highlight,
@@ -233,5 +235,5 @@ Then run that tag instead of `guacamole/guacd` in step 2.
   Ctrl+Alt+arrows / F-keys or DE shortcuts) are grabbed by *your* OS/window
   manager before the browser sees them, so they can't be forwarded from the
   physical keyboard.
-- Secrets live in `backend/.env`, `backend/key.pem`, and `backend/rdpm.sqlite`
+- Secrets live in `backend/.env`, `backend/key.pem`, and `backend/rdm.sqlite`
   (encrypted passwords) — keep them out of version control.
