@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import { Grid, LayoutGrid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check, Cpu, LogOut, ShieldCheck, ShieldOff } from 'lucide-react';
 import { GuacamoleClient } from './GuacamoleClient';
+import { RustDeskClient } from './RustDeskClient';
 import { useDeviceClipboard } from './deviceClipboard';
 import { OS_ICONS } from './OsIcons';
 import type { AuthStatus } from './Auth';
@@ -137,7 +138,7 @@ interface CustomInstance {
     name: string;
     ip: string;
     username: string;
-    protocol?: 'rdp' | 'vnc';
+    protocol?: 'rdp' | 'vnc' | 'rustdesk';
     hasPassword?: boolean;
     os?: '' | 'windows' | 'macos' | 'linux';
     swapKeys?: boolean;
@@ -397,7 +398,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     // Instance add/edit modal + its form.
     const [instanceModal, setInstanceModal] = useState<InstanceModal | null>(null);
     const [instanceForm, setInstanceForm] = useState({
-        name: '', ip: '', username: 'Administrator', protocol: 'rdp' as 'rdp' | 'vnc',
+        name: '', ip: '', username: 'Administrator', protocol: 'rdp' as 'rdp' | 'vnc' | 'rustdesk',
         os: '' as '' | 'windows' | 'macos' | 'linux', swapKeys: false,
         password: '', changePassword: false, hasPassword: false
     });
@@ -818,7 +819,11 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                 ...prev,
                 [instanceId]: {
                     instanceId,
-                    token: data.token,
+                    // RustDesk connections return a sessionId instead of a
+                    // guacamole-lite token (see POST /api/connect) — both flow
+                    // through this same `token` field since GuacamoleClient and
+                    // RustDeskClient share the prop contract.
+                    token: data.token ?? data.sessionId,
                     name,
                     ip
                 }
@@ -854,7 +859,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
             });
             if (!res.ok) throw new Error(await readErrorMessage(res));
             const data = await res.json();
-            setActiveSessions(prev => prev[instanceId] ? { ...prev, [instanceId]: { ...prev[instanceId], token: data.token } } : prev);
+            setActiveSessions(prev => prev[instanceId] ? { ...prev, [instanceId]: { ...prev[instanceId], token: data.token ?? data.sessionId } } : prev);
         } catch (err: any) {
             const reason = (err?.message || 'Unknown error').toString().trim();
             const label = instances.find(i => i.id === instanceId)?.name
@@ -1542,22 +1547,40 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                     onDrop={(e) => { e.preventDefault(); reorderSession(dragId, session.instanceId); setDragId(null); setDragOverId(null); }}
                                     className={`flex items-center justify-center min-h-[240px] min-w-0 rounded-lg transition-[opacity,transform,box-shadow] duration-150 ease-out ${gridLayout === 3 ? 'min-w-full shrink-0 snap-center h-full' : ''} ${isDropTarget ? 'ring-2 ring-blue-400 ring-offset-2 ring-offset-black scale-[1.015]' : ''} ${dragId === session.instanceId ? 'opacity-40 scale-[0.97]' : ''}`}
                                 >
-                                    <GuacamoleClient
-                                        instanceId={session.instanceId}
-                                        token={session.token}
-                                        name={name}
-                                        ip={ip}
-                                        protocol={custom?.protocol || 'rdp'}
-                                        os={os}
-                                        swapCtrlCmd={swapCtrlCmd}
-                                        clipboard={sharedClipboard}
-                                        onClipboard={publishClipboard}
-                                        onDisconnect={() => disconnectInstance(session.instanceId)}
-                                        onRefresh={() => refreshInstance(session.instanceId)}
-                                        onError={(message) => reportSessionError(session.instanceId, message)}
-                                        onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
-                                        onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
-                                    />
+                                    {custom?.protocol === 'rustdesk' ? (
+                                        <RustDeskClient
+                                            instanceId={session.instanceId}
+                                            token={session.token}
+                                            name={name}
+                                            ip={ip}
+                                            os={os}
+                                            swapCtrlCmd={swapCtrlCmd}
+                                            clipboard={sharedClipboard}
+                                            onClipboard={publishClipboard}
+                                            onDisconnect={() => disconnectInstance(session.instanceId)}
+                                            onRefresh={() => refreshInstance(session.instanceId)}
+                                            onError={(message) => reportSessionError(session.instanceId, message)}
+                                            onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
+                                            onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
+                                        />
+                                    ) : (
+                                        <GuacamoleClient
+                                            instanceId={session.instanceId}
+                                            token={session.token}
+                                            name={name}
+                                            ip={ip}
+                                            protocol={custom?.protocol || 'rdp'}
+                                            os={os}
+                                            swapCtrlCmd={swapCtrlCmd}
+                                            clipboard={sharedClipboard}
+                                            onClipboard={publishClipboard}
+                                            onDisconnect={() => disconnectInstance(session.instanceId)}
+                                            onRefresh={() => refreshInstance(session.instanceId)}
+                                            onError={(message) => reportSessionError(session.instanceId, message)}
+                                            onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
+                                            onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
+                                        />
+                                    )}
                                 </div>
                                 );
                             })}
@@ -1608,14 +1631,20 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                     <select
                                         className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white outline-none focus:border-blue-500"
                                         value={instanceForm.protocol}
-                                        onChange={e => setInstanceForm({...instanceForm, protocol: e.target.value as 'rdp' | 'vnc'})}
+                                        onChange={e => setInstanceForm({...instanceForm, protocol: e.target.value as 'rdp' | 'vnc' | 'rustdesk'})}
                                     >
                                         <option value="rdp">RDP (port 3389)</option>
                                         <option value="vnc">VNC (port 5900)</option>
+                                        <option value="rustdesk">RustDesk (port 21118)</option>
                                     </select>
                                     {instanceForm.protocol === 'vnc' && (
                                         <p className="text-xs text-slate-500 mt-1">
                                             Most VNC servers (e.g. UltraVNC) refuse all connections with a blank password — set one below even if the server's real auth is MS-Logon.
+                                        </p>
+                                    )}
+                                    {instanceForm.protocol === 'rustdesk' && (
+                                        <p className="text-xs text-slate-500 mt-1">
+                                            On the target machine: RustDesk → Settings → Network → unlock and enable "Direct IP Access", and Settings → Security → set a permanent password (that password goes below). Only works when rdm can reach that IP directly — no relay/rendezvous server involved.
                                         </p>
                                     )}
                                 </div>
@@ -1659,10 +1688,12 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                     </p>
                                 </div>
                             )}
-                            <div>
-                                <label className="block text-xs text-slate-400 mb-1">Username</label>
-                                <input required type="text" className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white outline-none focus:border-blue-500" value={instanceForm.username} onChange={e => setInstanceForm({...instanceForm, username: e.target.value})} />
-                            </div>
+                            {instanceForm.protocol !== 'rustdesk' && (
+                                <div>
+                                    <label className="block text-xs text-slate-400 mb-1">Username</label>
+                                    <input required type="text" className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white outline-none focus:border-blue-500" value={instanceForm.username} onChange={e => setInstanceForm({...instanceForm, username: e.target.value})} />
+                                </div>
+                            )}
                             <div>
                                 {isAdd ? (
                                     <>
