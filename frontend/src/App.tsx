@@ -1448,15 +1448,8 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
 
             {/* Header */}
             {isHeaderVisible && (
-            <header className="relative bg-slate-900 border-b border-slate-800 p-4 flex justify-between items-center shadow-lg z-10">
+            <header className="relative bg-slate-900 border-b border-slate-800 p-4 flex justify-between items-center shadow-lg z-40">
                 <div className="flex items-center gap-4">
-                    <button
-                        onClick={() => setIsSidebarVisible(!isSidebarVisible)}
-                        className="text-slate-400 hover:text-white transition-colors p-1"
-                        title="Toggle Sidebar"
-                    >
-                        {isSidebarVisible ? <PanelLeftClose size={24} /> : <PanelLeftOpen size={24} />}
-                    </button>
                     <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent">
                         RDm
                     </h1>
@@ -1529,7 +1522,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                     over the header content. */}
                 <button
                     onClick={() => setIsHeaderVisible(false)}
-                    className="absolute top-full left-1/2 -translate-x-1/2 bg-slate-800 text-slate-400 hover:text-white px-6 h-5 rounded-b-lg border-b border-x border-slate-700 shadow-md z-20 opacity-40 hover:opacity-100 transition-opacity flex items-center justify-center"
+                    className="absolute top-full left-1/2 -translate-x-1/2 bg-slate-800 text-slate-400 hover:text-white px-6 h-5 rounded-b-lg border-b border-x border-slate-700 shadow-md z-40 opacity-40 hover:opacity-100 transition-opacity flex items-center justify-center"
                     title="Hide Header"
                 >
                     <ChevronUp size={16} />
@@ -1537,7 +1530,19 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
             </header>
             )}
 
-            <div className="flex flex-1 overflow-hidden">
+            <div className="flex flex-1 overflow-hidden relative">
+                {/* Sidebar hider: mirrors the header's show/hide tabs, but centered
+                    on the left edge and fully invisible until hovered. */}
+                {!isSidebarVisible && (
+                    <button
+                        onClick={() => setIsSidebarVisible(true)}
+                        className="fixed top-1/2 left-0 -translate-y-1/2 bg-slate-800 text-slate-400 hover:text-white py-6 px-1 rounded-r-lg border-r border-y border-slate-700 shadow-xl z-30 opacity-20 hover:opacity-100 hover:z-50 transition-all flex items-center justify-center"
+                        title="Show Sidebar"
+                    >
+                        <PanelLeftOpen size={20} />
+                    </button>
+                )}
+
                 {/* Sidebar */}
                 {isSidebarVisible && (
                     <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col overflow-y-auto shrink-0">
@@ -1695,6 +1700,16 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                         )}
                     </ul>
                 </aside>
+                )}
+
+                {isSidebarVisible && (
+                    <button
+                        onClick={() => setIsSidebarVisible(false)}
+                        className="fixed top-1/2 left-64 -translate-y-1/2 bg-slate-800 text-slate-400 hover:text-white w-5 py-6 rounded-r-lg border-r border-y border-slate-700 shadow-md z-20 opacity-40 hover:opacity-100 hover:z-50 transition-opacity flex items-center justify-center"
+                        title="Hide Sidebar"
+                    >
+                        <PanelLeftClose size={20} />
+                    </button>
                 )}
 
                 {/* Main Content - Grid View */}
