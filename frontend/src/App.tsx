@@ -133,16 +133,35 @@ interface ActiveSession {
     ip: string;
 }
 
+type Protocol = 'rdp' | 'vnc' | 'rustdesk';
+
 interface CustomInstance {
     id: string;
     name: string;
     ip: string;
-    username: string;
-    protocol?: 'rdp' | 'vnc' | 'rustdesk';
-    hasPassword?: boolean;
+    protocol?: Protocol;
     os?: '' | 'windows' | 'macos' | 'linux';
     swapKeys?: boolean;
+    // Each protocol keeps its own credentials — RustDesk has no username.
+    rdpUsername?: string;
+    rdpHasPassword?: boolean;
+    vncUsername?: string;
+    vncHasPassword?: boolean;
+    rustdeskHasPassword?: boolean;
 }
+
+// Pulls whichever protocol's saved username/hasPassword out of a CustomInstance.
+const credsForProtocol = (inst: CustomInstance, protocol: Protocol): { username: string; hasPassword: boolean } => {
+    switch (protocol) {
+        case 'vnc':
+            return { username: inst.vncUsername || 'Administrator', hasPassword: !!inst.vncHasPassword };
+        case 'rustdesk':
+            return { username: '', hasPassword: !!inst.rustdeskHasPassword };
+        case 'rdp':
+        default:
+            return { username: inst.rdpUsername || 'Administrator', hasPassword: !!inst.rdpHasPassword };
+    }
+};
 
 interface Billing {
     available: boolean;
@@ -397,10 +416,19 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
 
     // Instance add/edit modal + its form.
     const [instanceModal, setInstanceModal] = useState<InstanceModal | null>(null);
+    // `savedCreds` holds each protocol's already-saved username/hasPassword for
+    // the instance being edited, so switching the protocol dropdown shows that
+    // protocol's own stored state instead of leaking another protocol's values.
+    const emptyCreds = (): Record<Protocol, { username: string; hasPassword: boolean }> => ({
+        rdp: { username: 'Administrator', hasPassword: false },
+        vnc: { username: 'Administrator', hasPassword: false },
+        rustdesk: { username: '', hasPassword: false }
+    });
     const [instanceForm, setInstanceForm] = useState({
-        name: '', ip: '', username: 'Administrator', protocol: 'rdp' as 'rdp' | 'vnc' | 'rustdesk',
+        name: '', ip: '', username: 'Administrator', protocol: 'rdp' as Protocol,
         os: '' as '' | 'windows' | 'macos' | 'linux', swapKeys: false,
-        password: '', changePassword: false, hasPassword: false
+        password: '', changePassword: false, hasPassword: false,
+        savedCreds: emptyCreds()
     });
 
     // Reusable confirmation dialog (used for every stop action).
@@ -871,12 +899,19 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
 
     // Open the add/edit modal, prefilled for the target.
     const openAddModal = () => {
-        setInstanceForm({ name: '', ip: '', username: 'Administrator', protocol: 'rdp', os: '', swapKeys: false, password: '', changePassword: true, hasPassword: false });
+        setInstanceForm({ name: '', ip: '', username: 'Administrator', protocol: 'rdp', os: '', swapKeys: false, password: '', changePassword: true, hasPassword: false, savedCreds: emptyCreds() });
         setInstanceModal({ mode: 'add' });
     };
 
     const openEditCustom = (inst: CustomInstance) => {
-        setInstanceForm({ name: inst.name, ip: inst.ip, username: inst.username || 'Administrator', protocol: inst.protocol || 'rdp', os: inst.os || '', swapKeys: !!inst.swapKeys, password: '', changePassword: false, hasPassword: !!inst.hasPassword });
+        const protocol = inst.protocol || 'rdp';
+        const savedCreds: Record<Protocol, { username: string; hasPassword: boolean }> = {
+            rdp: credsForProtocol(inst, 'rdp'),
+            vnc: credsForProtocol(inst, 'vnc'),
+            rustdesk: credsForProtocol(inst, 'rustdesk')
+        };
+        const current = savedCreds[protocol];
+        setInstanceForm({ name: inst.name, ip: inst.ip, username: current.username, protocol, os: inst.os || '', swapKeys: !!inst.swapKeys, password: '', changePassword: false, hasPassword: current.hasPassword, savedCreds });
         setInstanceModal({ mode: 'edit-custom', id: inst.id });
     };
 
@@ -887,7 +922,8 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
             username: inst.username || 'Administrator',
             protocol: 'rdp',
             os: inst.os || '', swapKeys: !!inst.swapKeys,
-            password: '', changePassword: false, hasPassword: !!inst.hasPassword
+            password: '', changePassword: false, hasPassword: !!inst.hasPassword,
+            savedCreds: emptyCreds()
         });
         setInstanceModal({ mode: 'edit-ec2', id: inst.id });
     };
@@ -1631,7 +1667,13 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                     <select
                                         className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white outline-none focus:border-blue-500"
                                         value={instanceForm.protocol}
-                                        onChange={e => setInstanceForm({...instanceForm, protocol: e.target.value as 'rdp' | 'vnc' | 'rustdesk'})}
+                                        onChange={e => {
+                                            const protocol = e.target.value as Protocol;
+                                            // Each protocol has its own saved username/password — show that
+                                            // protocol's own state instead of carrying over the previous one's.
+                                            const creds = instanceForm.savedCreds[protocol];
+                                            setInstanceForm({...instanceForm, protocol, username: creds.username, hasPassword: creds.hasPassword, password: '', changePassword: false});
+                                        }}
                                     >
                                         <option value="rdp">RDP (port 3389)</option>
                                         <option value="vnc">VNC (port 5900)</option>

@@ -383,7 +383,7 @@ app.get('/api/custom-instances', async (req, res) => {
 app.post('/api/custom-instances', async (req, res) => {
     try {
         const { id, name, ip, username, password, protocol, os, swapKeys } = req.body;
-        await addCustomInstance(id, name, ip, username, password, protocol || 'rdp', os || '', !!swapKeys);
+        await addCustomInstance(id, name, ip, protocol || 'rdp', username, password, os || '', !!swapKeys);
         res.json({ success: true });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
