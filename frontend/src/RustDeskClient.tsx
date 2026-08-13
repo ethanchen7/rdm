@@ -409,8 +409,9 @@ export const RustDeskClient: React.FC<Props> = ({ token, name, ip, os, swapCtrlC
             className="relative bg-slate-900 border-2 border-slate-700 rounded-lg overflow-hidden flex flex-col group focus-within:border-yellow-400 focus-within:shadow-[0_0_15px_rgba(250,204,21,0.6)] transition-[border-color,box-shadow] duration-150 max-w-full max-h-full"
             style={box ? { width: box.w } : { width: '100%', height: '100%' }}
             onClick={() => displayRef.current?.focus({ preventScroll: true })}
+            onMouseEnter={() => displayRef.current?.focus({ preventScroll: true })}
         >
-            <div ref={headerRef} className="group/bar bg-slate-800 border-b border-slate-700 px-2 py-1 text-white flex justify-between items-center shrink-0 z-10">
+            <div ref={headerRef} onDoubleClick={toggleFullscreen} className="group/bar bg-slate-800 border-b border-slate-700 px-2 py-1 text-white flex justify-between items-center shrink-0 z-10">
                 <span className="flex items-center gap-1.5 truncate">
                     <span
                         draggable
