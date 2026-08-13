@@ -10,6 +10,68 @@ import './index.css';
 let toastSeq = 0;
 interface Toast { id: number; message: string; type: 'error' | 'success' | 'info'; }
 
+// Grid spacing shared by the static Tailwind gap classes and the fill-grid's
+// own inline layout math, so tiles line up with the same rhythm regardless of
+// which layout is active.
+const GRID_GAP = 12; // px, matches Tailwind's gap-3
+// Approximate rendered height of a session card's header bar (px-2 py-1,
+// text-sm + 16-20px icons, border-b). Only an estimate: each card's own
+// ResizeObserver-based sizing (see GuacamoleClient/RustDeskClient) measures
+// its *actual* header height and fits its 16:9 body to whatever's left, so a
+// few px of error here just costs a little unused space, not a broken layout.
+const CARD_HEADER_H = 30;
+
+interface FillTileLayout {
+    cols: number;
+    rows: number;
+    tileW: number;
+    tileH: number;
+    // Whether every tile fits within the container's height without needing
+    // to scroll — used to decide whether to vertically center the grid or
+    // pin it to the top so overflow scrolls naturally.
+    fitsVertically: boolean;
+}
+
+// Picks the column/row split (and resulting tile size) that fits `count`
+// same-aspect-ratio tiles into a containerW x containerH box as large as
+// possible, packing rows tightly instead of stretching them to fill height.
+function computeFillLayout(
+    containerW: number,
+    containerH: number,
+    count: number,
+    gap: number,
+    headerH: number,
+    aspect = 16 / 9
+): FillTileLayout | null {
+    if (containerW <= 0 || containerH <= 0 || count <= 0) return null;
+    let best: FillTileLayout & { area: number } | null = null;
+    for (let cols = 1; cols <= count; cols++) {
+        const rows = Math.ceil(count / cols);
+        const availW = containerW - gap * (cols - 1);
+        if (availW <= 0) continue;
+        let tileW = availW / cols;
+        let bodyH = tileW / aspect;
+        let tileH = bodyH + headerH;
+        const totalH = tileH * rows + gap * (rows - 1);
+        let fitsVertically = totalH <= containerH;
+        if (!fitsVertically) {
+            const availH = containerH - gap * (rows - 1);
+            if (availH <= 0) continue;
+            tileH = availH / rows;
+            bodyH = tileH - headerH;
+            if (bodyH <= 0) continue;
+            tileW = bodyH * aspect;
+        }
+        const area = tileW * bodyH;
+        if (!best || area > best.area) {
+            best = { cols, rows, tileW, tileH, fitsVertically, area };
+        }
+    }
+    if (!best) return null;
+    const { area: _area, ...layout } = best;
+    return layout;
+}
+
 interface EC2Instance {
     id: string;
     name: string;
@@ -341,6 +403,24 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     // always interpolable, regardless of what layout changed underneath.
     const gridCellRefs = useRef<Record<string, HTMLDivElement | null>>({});
     const pendingFlipRects = useRef<Record<string, DOMRect> | null>(null);
+    // Fill layout (gridLayout === 4): tracks the grid container's own size so
+    // computeFillLayout can pick the tile count/size that best fills it. A
+    // callback ref (rather than useRef + a mount-only effect) because this
+    // element only exists while gridLayout === 4 and orderedSessions is
+    // non-empty — it unmounts/remounts as those flip, and each mount needs
+    // its own ResizeObserver rather than one wired up only on first render.
+    const [fillContainerSize, setFillContainerSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+    const fillResizeObserver = useRef<ResizeObserver | null>(null);
+    const setFillGridRef = useCallback((el: HTMLDivElement | null) => {
+        fillResizeObserver.current?.disconnect();
+        fillResizeObserver.current = null;
+        if (!el) return;
+        const measure = () => setFillContainerSize({ w: el.clientWidth, h: el.clientHeight });
+        const ro = new ResizeObserver(measure);
+        ro.observe(el);
+        fillResizeObserver.current = ro;
+        measure();
+    }, []);
     const changeGridLayout = (next: number) => {
         const rects: Record<string, DOMRect> = {};
         for (const [id, el] of Object.entries(gridCellRefs.current)) {
@@ -1280,7 +1360,10 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
             case 1: return 'grid grid-cols-1 auto-rows-fr';
             case 2: return 'grid grid-cols-1 md:grid-cols-2 auto-rows-fr';
             case 3: return 'flex overflow-x-auto snap-x snap-mandatory'; // Horizontal
-            case 4: return 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 auto-rows-fr';
+            // Fill: column/row count and tile size are computed dynamically
+            // (see computeFillLayout) and applied via inline style below, so
+            // no Tailwind grid-cols/rows classes are needed here.
+            case 4: return 'grid';
             default: return 'grid grid-cols-1 auto-rows-fr';
         }
     };
@@ -1288,6 +1371,68 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     const activeSessionList = Object.values(activeSessions);
     // Render in explicit drag order; ignore ids no longer connected.
     const orderedSessions = sessionOrder.map(id => activeSessions[id]).filter(Boolean) as ActiveSession[];
+    const fillLayout = gridLayout === 4
+        ? computeFillLayout(fillContainerSize.w, fillContainerSize.h, orderedSessions.length, GRID_GAP, CARD_HEADER_H)
+        : null;
+
+    const renderSessionTile = (session: ActiveSession) => {
+        // Resolve name/IP from the live instance lists so a session restored
+        // on page load (before the lists have finished fetching) still shows
+        // the friendly name/IP instead of the raw instance id. Fall back to
+        // whatever was snapshotted at connect time.
+        const custom = customInstances.find(c => c.id === session.instanceId);
+        const ec2 = instances.find(i => i.id === session.instanceId);
+        const name = custom?.name || ec2?.label || ec2?.name || session.name;
+        const ip = custom?.ip || ec2?.publicIp || ec2?.privateIp || session.ip;
+        const os = custom?.os || ec2?.os || '';
+        const swapCtrlCmd = os === 'macos' && !!(custom?.swapKeys || ec2?.swapKeys);
+        const isDropTarget = dragOverId === session.instanceId && dragId !== session.instanceId;
+        return (
+        <div
+            key={session.instanceId}
+            ref={(el) => { gridCellRefs.current[session.instanceId] = el; }}
+            onDragOver={(e) => { if (dragId) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dragOverId !== session.instanceId) setDragOverId(session.instanceId); } }}
+            onDragLeave={() => { if (dragOverId === session.instanceId) setDragOverId(null); }}
+            onDrop={(e) => { e.preventDefault(); reorderSession(dragId, session.instanceId); setDragId(null); setDragOverId(null); }}
+            className={`flex items-center justify-center min-w-0 rounded-lg transition-[opacity,transform,box-shadow] duration-150 ease-out ${gridLayout === 4 ? 'overflow-hidden' : 'min-h-[240px]'} ${gridLayout === 3 ? 'min-w-full shrink-0 snap-center h-full' : ''} ${isDropTarget ? 'ring-2 ring-blue-400 ring-offset-2 ring-offset-black scale-[1.015]' : ''} ${dragId === session.instanceId ? 'opacity-40 scale-[0.97]' : ''}`}
+        >
+            {custom?.protocol === 'rustdesk' ? (
+                <RustDeskClient
+                    instanceId={session.instanceId}
+                    token={session.token}
+                    name={name}
+                    ip={ip}
+                    os={os}
+                    swapCtrlCmd={swapCtrlCmd}
+                    clipboard={sharedClipboard}
+                    onClipboard={publishClipboard}
+                    onDisconnect={() => disconnectInstance(session.instanceId)}
+                    onRefresh={() => refreshInstance(session.instanceId)}
+                    onError={(message) => reportSessionError(session.instanceId, message)}
+                    onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
+                    onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
+                />
+            ) : (
+                <GuacamoleClient
+                    instanceId={session.instanceId}
+                    token={session.token}
+                    name={name}
+                    ip={ip}
+                    protocol={custom?.protocol || 'rdp'}
+                    os={os}
+                    swapCtrlCmd={swapCtrlCmd}
+                    clipboard={sharedClipboard}
+                    onClipboard={publishClipboard}
+                    onDisconnect={() => disconnectInstance(session.instanceId)}
+                    onRefresh={() => refreshInstance(session.instanceId)}
+                    onError={(message) => reportSessionError(session.instanceId, message)}
+                    onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
+                    onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
+                />
+            )}
+        </div>
+        );
+    };
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col font-sans relative">
@@ -1356,7 +1501,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                     <button
                         onClick={() => changeGridLayout(4)}
                         className={`p-2 rounded transition-colors ${gridLayout === 4 ? 'bg-slate-700 text-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
-                        title="4x4 Grid"
+                        title="Fill Grid"
                     >
                         <LayoutGrid size={20} />
                     </button>
@@ -1553,73 +1698,38 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                 )}
 
                 {/* Main Content - Grid View */}
-                <main className="flex-1 bg-black p-4 overflow-y-auto">
+                <main className="flex-1 bg-black p-3 overflow-y-auto">
                     {orderedSessions.length === 0 ? (
                         <div className="h-full flex flex-col items-center justify-center text-slate-500">
                             <Maximize size={48} className="mb-4 opacity-20" />
                             <p className="text-lg">Select an instance to start a session</p>
                         </div>
-                    ) : (
-                        <div className={`gap-4 h-full ${getGridClass()}`}>
-                            {orderedSessions.map(session => {
-                                // Resolve name/IP from the live instance lists so a
-                                // session restored on page load (before the lists have
-                                // finished fetching) still shows the friendly name/IP
-                                // instead of the raw instance id. Fall back to whatever
-                                // was snapshotted at connect time.
-                                const custom = customInstances.find(c => c.id === session.instanceId);
-                                const ec2 = instances.find(i => i.id === session.instanceId);
-                                const name = custom?.name || ec2?.label || ec2?.name || session.name;
-                                const ip = custom?.ip || ec2?.publicIp || ec2?.privateIp || session.ip;
-                                const os = custom?.os || ec2?.os || '';
-                                const swapCtrlCmd = os === 'macos' && !!(custom?.swapKeys || ec2?.swapKeys);
-                                const isDropTarget = dragOverId === session.instanceId && dragId !== session.instanceId;
-                                return (
+                    ) : gridLayout === 4 ? (
+                        // Fill: tiles are sized/packed dynamically (computeFillLayout)
+                        // to fit as many 16:9 cards on screen as possible, with rows
+                        // packed to their actual content height instead of stretched
+                        // fr rows — otherwise a couple of tall rows end up far apart.
+                        <div
+                            ref={setFillGridRef}
+                            className="h-full w-full flex overflow-visible"
+                            style={{ justifyContent: 'center', alignItems: fillLayout?.fitsVertically ? 'center' : 'flex-start' }}
+                        >
+                            {fillLayout && (
                                 <div
-                                    key={session.instanceId}
-                                    ref={(el) => { gridCellRefs.current[session.instanceId] = el; }}
-                                    onDragOver={(e) => { if (dragId) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dragOverId !== session.instanceId) setDragOverId(session.instanceId); } }}
-                                    onDragLeave={() => { if (dragOverId === session.instanceId) setDragOverId(null); }}
-                                    onDrop={(e) => { e.preventDefault(); reorderSession(dragId, session.instanceId); setDragId(null); setDragOverId(null); }}
-                                    className={`flex items-center justify-center min-h-[240px] min-w-0 rounded-lg transition-[opacity,transform,box-shadow] duration-150 ease-out ${gridLayout === 3 ? 'min-w-full shrink-0 snap-center h-full' : ''} ${isDropTarget ? 'ring-2 ring-blue-400 ring-offset-2 ring-offset-black scale-[1.015]' : ''} ${dragId === session.instanceId ? 'opacity-40 scale-[0.97]' : ''}`}
+                                    className="grid"
+                                    style={{
+                                        gridTemplateColumns: `repeat(${fillLayout.cols}, ${fillLayout.tileW}px)`,
+                                        gridAutoRows: `${fillLayout.tileH}px`,
+                                        gap: `${GRID_GAP}px`,
+                                    }}
                                 >
-                                    {custom?.protocol === 'rustdesk' ? (
-                                        <RustDeskClient
-                                            instanceId={session.instanceId}
-                                            token={session.token}
-                                            name={name}
-                                            ip={ip}
-                                            os={os}
-                                            swapCtrlCmd={swapCtrlCmd}
-                                            clipboard={sharedClipboard}
-                                            onClipboard={publishClipboard}
-                                            onDisconnect={() => disconnectInstance(session.instanceId)}
-                                            onRefresh={() => refreshInstance(session.instanceId)}
-                                            onError={(message) => reportSessionError(session.instanceId, message)}
-                                            onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
-                                            onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
-                                        />
-                                    ) : (
-                                        <GuacamoleClient
-                                            instanceId={session.instanceId}
-                                            token={session.token}
-                                            name={name}
-                                            ip={ip}
-                                            protocol={custom?.protocol || 'rdp'}
-                                            os={os}
-                                            swapCtrlCmd={swapCtrlCmd}
-                                            clipboard={sharedClipboard}
-                                            onClipboard={publishClipboard}
-                                            onDisconnect={() => disconnectInstance(session.instanceId)}
-                                            onRefresh={() => refreshInstance(session.instanceId)}
-                                            onError={(message) => reportSessionError(session.instanceId, message)}
-                                            onReorderDragStart={(e) => { setBlankDragImage(e); setDragId(session.instanceId); }}
-                                            onReorderDragEnd={() => { setDragId(null); setDragOverId(null); }}
-                                        />
-                                    )}
+                                    {orderedSessions.map(renderSessionTile)}
                                 </div>
-                                );
-                            })}
+                            )}
+                        </div>
+                    ) : (
+                        <div className={`gap-3 h-full ${getGridClass()}`}>
+                            {orderedSessions.map(renderSessionTile)}
                         </div>
                     )}
                 </main>
