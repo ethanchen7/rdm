@@ -385,7 +385,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     // Explicit render order for the grid, so panes can be dragged to reorder.
     // Persisted to localStorage so an arrangement survives reloads/reconnects.
     const [sessionOrder, setSessionOrder] = useState<string[]>(() => {
-        try { return JSON.parse(localStorage.getItem('rdpm_order') || '[]'); } catch { return []; }
+        try { return JSON.parse(localStorage.getItem('rdm_order') || '[]'); } catch { return []; }
     });
     // Dedicated full-view reorder mode: minimizes every session into compact,
     // easily-draggable tiles so ordering works regardless of the grid layout.
@@ -459,11 +459,11 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
         }
     }, [gridLayout]);
     const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(() => {
-        const stored = localStorage.getItem('rdpm_sidebar');
+        const stored = localStorage.getItem('rdm_sidebar');
         return stored !== null ? stored === 'true' : true;
     });
     const [isHeaderVisible, setIsHeaderVisible] = useState<boolean>(() => {
-        const stored = localStorage.getItem('rdpm_header');
+        const stored = localStorage.getItem('rdm_header');
         return stored !== null ? stored === 'true' : true;
     });
     const [loading, setLoading] = useState(false);
@@ -765,22 +765,22 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
         fetchInstances();
         fetchCustomInstances();
         fetchBilling();
-        const storedSettings = localStorage.getItem('rdpm_settings');
+        const storedSettings = localStorage.getItem('rdm_settings');
         if (storedSettings) {
             try { setGlobalSettings(JSON.parse(storedSettings)); } catch(e){}
         }
     }, []);
 
     // Session persistence: sessionStorage tracks which sessions were open;
-    // localStorage ('rdpm_order') remembers their arrangement across reloads.
+    // localStorage ('rdm_order') remembers their arrangement across reloads.
     useEffect(() => {
         if (!hasRestored) {
-            const stored = sessionStorage.getItem('rdpm_active_sessions');
+            const stored = sessionStorage.getItem('rdm_active_sessions');
             if (stored) {
                 try {
                     const activeIds: string[] = JSON.parse(stored);
                     const remembered: string[] = (() => {
-                        try { return JSON.parse(localStorage.getItem('rdpm_order') || '[]'); } catch { return []; }
+                        try { return JSON.parse(localStorage.getItem('rdm_order') || '[]'); } catch { return []; }
                     })();
                     // Reconnect in the remembered order; append any that weren't ranked.
                     const ordered = [
@@ -792,22 +792,22 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
             }
             setHasRestored(true);
         } else {
-            sessionStorage.setItem('rdpm_active_sessions', JSON.stringify(Object.keys(activeSessions)));
+            sessionStorage.setItem('rdm_active_sessions', JSON.stringify(Object.keys(activeSessions)));
         }
     }, [activeSessions, hasRestored]);
 
     // Remember the arrangement.
     useEffect(() => {
-        localStorage.setItem('rdpm_order', JSON.stringify(sessionOrder));
+        localStorage.setItem('rdm_order', JSON.stringify(sessionOrder));
     }, [sessionOrder]);
 
     // UI State persistence
     useEffect(() => {
-        localStorage.setItem('rdpm_sidebar', isSidebarVisible.toString());
+        localStorage.setItem('rdm_sidebar', isSidebarVisible.toString());
     }, [isSidebarVisible]);
 
     useEffect(() => {
-        localStorage.setItem('rdpm_header', isHeaderVisible.toString());
+        localStorage.setItem('rdm_header', isHeaderVisible.toString());
     }, [isHeaderVisible]);
 
     // An instance counts as transitioning while we're waiting on a start/stop we
@@ -2285,7 +2285,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                 <input type="checkbox" checked={globalSettings.fontSmoothing} onChange={e => {
                                     const newSet = {...globalSettings, fontSmoothing: e.target.checked};
                                     setGlobalSettings(newSet);
-                                    localStorage.setItem('rdpm_settings', JSON.stringify(newSet));
+                                    localStorage.setItem('rdm_settings', JSON.stringify(newSet));
                                 }} className="w-4 h-4" />
                             </div>
                             <div>
@@ -2296,7 +2296,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                     onChange={e => {
                                         const newSet = {...globalSettings, colorDepth: e.target.value};
                                         setGlobalSettings(newSet);
-                                        localStorage.setItem('rdpm_settings', JSON.stringify(newSet));
+                                        localStorage.setItem('rdm_settings', JSON.stringify(newSet));
                                     }}
                                 >
                                     <option value="16">16-bit (Faster)</option>
@@ -2312,7 +2312,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                 <input type="checkbox" checked={globalSettings.vncLossless} onChange={e => {
                                     const newSet = {...globalSettings, vncLossless: e.target.checked};
                                     setGlobalSettings(newSet);
-                                    localStorage.setItem('rdpm_settings', JSON.stringify(newSet));
+                                    localStorage.setItem('rdm_settings', JSON.stringify(newSet));
                                 }} className="w-4 h-4" />
                             </div>
 
