@@ -195,6 +195,7 @@ async function handleClientMessage(client: RustDeskClient, msg: Record<string, u
         mask: Number(msg.mask ?? 0),
         x: Number(msg.x ?? 0),
         y: Number(msg.y ?? 0),
+        ...(Array.isArray(msg.modifiers) ? { modifiers: msg.modifiers.map(Number) } : {}),
       });
       return;
     case 'key':

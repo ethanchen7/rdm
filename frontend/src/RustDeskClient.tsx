@@ -292,24 +292,24 @@ export const RustDeskClient: React.FC<Props> = ({ token, name, ip, layoutVersion
             const { x, y } = scaleCoords(e);
             cursorPos.current = { x, y };
             positionCursor();
-            send({ type: 'mouse', mask: MOUSE_TYPE_MOVE, x, y });
+            send({ type: 'mouse', mask: MOUSE_TYPE_MOVE, x, y, modifiers: modifiersArray() });
         };
         const onMouseDown = (e: MouseEvent) => {
             e.preventDefault();
             const { x, y } = scaleCoords(e);
             cursorPos.current = { x, y };
             positionCursor();
-            send({ type: 'mouse', mask: MOUSE_TYPE_DOWN | (buttonBit(e.button) << 3), x, y });
+            send({ type: 'mouse', mask: MOUSE_TYPE_DOWN | (buttonBit(e.button) << 3), x, y, modifiers: modifiersArray() });
         };
         const onMouseUp = (e: MouseEvent) => {
             const { x, y } = scaleCoords(e);
             cursorPos.current = { x, y };
             positionCursor();
-            send({ type: 'mouse', mask: MOUSE_TYPE_UP | (buttonBit(e.button) << 3), x, y });
+            send({ type: 'mouse', mask: MOUSE_TYPE_UP | (buttonBit(e.button) << 3), x, y, modifiers: modifiersArray() });
         };
         const onWheel = (e: WheelEvent) => {
             e.preventDefault();
-            send({ type: 'mouse', mask: MOUSE_TYPE_WHEEL, x: 0, y: e.deltaY > 0 ? -1 : 1 });
+            send({ type: 'mouse', mask: MOUSE_TYPE_WHEEL, x: 0, y: e.deltaY > 0 ? -1 : 1, modifiers: modifiersArray() });
         };
         const onContextMenu = (e: MouseEvent) => e.preventDefault();
 
