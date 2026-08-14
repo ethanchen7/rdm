@@ -556,6 +556,14 @@ app.post('/api/connect', async (req, res) => {
                     'ignore-cert': 'true',
                     width: '1920',
                     height: '1080',
+                    // Otherwise guacd is free to renegotiate the session
+                    // resolution to match whatever pixel size the grid pane
+                    // currently renders at (e.g. while the fill grid
+                    // reflows), which briefly blacks out the RDP session
+                    // mid-resize. Pin it to the fixed 1920x1080 above and
+                    // let the client-side canvas scaling in
+                    // GuacamoleClient handle fitting it into the pane.
+                    'resize-method': 'none',
                     'color-depth': settings.colorDepth || '32',
                     'enable-font-smoothing': settings.fontSmoothing !== false ? 'true' : 'false',
                     'enable-theming': 'true',

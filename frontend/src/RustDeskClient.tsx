@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Maximize, Minimize, RefreshCw, X, GripVertical } from 'lucide-react';
 import { writeDeviceClipboard } from './deviceClipboard';
 import { OS_ICONS } from './OsIcons';
@@ -11,6 +11,17 @@ interface Props {
     token: string;
     name: string;
     ip: string;
+    // Bumped by the parent whenever it switches grid layouts, so the cell
+    // can be remeasured synchronously in the same commit instead of waiting
+    // a frame on the ResizeObserver below — see GuacamoleClient's copy of
+    // this prop for the full story.
+    layoutVersion?: number;
+    // False for the single-view layout — see GuacamoleClient's copy of this
+    // prop for the full story.
+    fitViewport?: boolean;
+    // Single-clicking the header toggles this pane filling the whole main
+    // content area in-page — see GuacamoleClient's copy of this prop.
+    onToggleMaximize?: () => void;
     os?: '' | 'windows' | 'macos' | 'linux';
     swapCtrlCmd?: boolean;
     onDisconnect: () => void;
@@ -70,7 +81,7 @@ function cursorRgbaToDataUrl(width: number, height: number, base64: string): str
     }
 }
 
-export const RustDeskClient: React.FC<Props> = ({ token, name, ip, os, swapCtrlCmd, onDisconnect, onRefresh, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
+export const RustDeskClient: React.FC<Props> = ({ token, name, ip, layoutVersion, fitViewport = true, onToggleMaximize, os, swapCtrlCmd, onDisconnect, onRefresh, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
     const rootRef = useRef<HTMLDivElement>(null);
     const headerRef = useRef<HTMLDivElement>(null);
     const displayRef = useRef<HTMLDivElement>(null);
@@ -89,29 +100,47 @@ export const RustDeskClient: React.FC<Props> = ({ token, name, ip, os, swapCtrlC
     onErrorRef.current = onError;
     const swapCtrlCmdRef = useRef(swapCtrlCmd);
     swapCtrlCmdRef.current = swapCtrlCmd;
+    const fitViewportRef = useRef(fitViewport);
+    fitViewportRef.current = fitViewport;
     const wasConnected = useRef(false);
     const failed = useRef(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [box, setBox] = useState<{ w: number; h: number } | null>(null);
 
+    const measureBox = () => {
+        const cell = rootRef.current?.parentElement;
+        if (!cell) return;
+        const cw = cell.clientWidth;
+        if (cw <= 0) return;
+        let w = cw;
+        let h = (w * 9) / 16;
+        if (fitViewportRef.current) {
+            const headerH = headerRef.current?.offsetHeight ?? 0;
+            const ch = cell.clientHeight - headerH;
+            if (ch <= 0) return;
+            if (h > ch) { h = ch; w = (h * 16) / 9; }
+        }
+        setBox({ w: Math.floor(w), h: Math.floor(h) });
+    };
+
     useEffect(() => {
         const cell = rootRef.current?.parentElement;
         if (!cell) return;
-        const measure = () => {
-            const headerH = headerRef.current?.offsetHeight ?? 0;
-            const cw = cell.clientWidth;
-            const ch = cell.clientHeight - headerH;
-            if (cw <= 0 || ch <= 0) return;
-            let w = cw;
-            let h = (w * 9) / 16;
-            if (h > ch) { h = ch; w = (h * 16) / 9; }
-            setBox({ w: Math.floor(w), h: Math.floor(h) });
-        };
-        const ro = new ResizeObserver(measure);
+        const ro = new ResizeObserver(measureBox);
         ro.observe(cell);
-        measure();
+        measureBox();
         return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // See GuacamoleClient's identical effect: closes the ResizeObserver's
+    // one-frame-plus lag to zero for parent-driven grid layout switches,
+    // which is what made a big small-to-large jump (e.g. 2x2 -> single view)
+    // visibly snap to size late.
+    useLayoutEffect(() => {
+        measureBox();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [layoutVersion]);
 
     useEffect(() => {
         if (!displayRef.current) return;
@@ -403,15 +432,38 @@ export const RustDeskClient: React.FC<Props> = ({ token, name, ip, os, swapCtrlC
         }
     };
 
+    // See GuacamoleClient's copy: single-click toggles in-page maximize,
+    // held for a beat so a second click (a dblclick, for real fullscreen)
+    // can cancel it instead of both firing.
+    const headerClickTimer = useRef<number | null>(null);
+    const handleHeaderClick = () => {
+        if (!onToggleMaximize) return;
+        if (headerClickTimer.current !== null) return;
+        headerClickTimer.current = window.setTimeout(() => {
+            headerClickTimer.current = null;
+            onToggleMaximize();
+        }, 100);
+    };
+    const handleHeaderDoubleClick = () => {
+        if (headerClickTimer.current !== null) {
+            clearTimeout(headerClickTimer.current);
+            headerClickTimer.current = null;
+        }
+        toggleFullscreen();
+    };
+    useEffect(() => () => {
+        if (headerClickTimer.current !== null) clearTimeout(headerClickTimer.current);
+    }, []);
+
     return (
         <div
             ref={rootRef}
-            className="relative bg-slate-900 border-2 border-slate-700 rounded-lg overflow-hidden flex flex-col group focus-within:border-yellow-400 focus-within:shadow-[0_0_15px_rgba(250,204,21,0.6)] transition-[border-color,box-shadow] duration-150 max-w-full max-h-full"
+            className="relative bg-slate-900 border-2 border-slate-700 rounded-lg overflow-hidden flex flex-col group focus-within:border-yellow-400 focus-within:shadow-[0_0_15px_rgba(250,204,21,0.6)] transition-[border-color,box-shadow] duration-150 max-w-full max-h-full [contain:content]"
             style={box ? { width: box.w } : { width: '100%', height: '100%' }}
             onClick={() => displayRef.current?.focus({ preventScroll: true })}
             onMouseEnter={() => displayRef.current?.focus({ preventScroll: true })}
         >
-            <div ref={headerRef} onDoubleClick={toggleFullscreen} className="group/bar bg-slate-800 border-b border-slate-700 px-2 py-1 text-white flex justify-between items-center shrink-0 z-10">
+            <div ref={headerRef} onClick={handleHeaderClick} onDoubleClick={handleHeaderDoubleClick} className="group/bar bg-slate-800 border-b border-slate-700 px-2 py-1 text-white flex justify-between items-center shrink-0 z-10">
                 <span className="flex items-center gap-1.5 truncate">
                     <span
                         draggable

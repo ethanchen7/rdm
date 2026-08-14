@@ -72,6 +72,60 @@ function computeFillLayout(
     return layout;
 }
 
+// How many columns `count` zoomed tiles resolve to: the container width
+// divided by the zoomed target tile width, rounded to the nearest whole
+// column and clamped to [1, count].
+function colsForFillZoom(baseTileW: number, containerW: number, gap: number, count: number, zoom: number): number {
+    const idealTileW = baseTileW * zoom;
+    return Math.max(1, Math.min(count, Math.round((containerW + gap) / (idealTileW + gap))));
+}
+
+// Re-flows a fill-grid layout for the zoom slider. Rather than just scaling
+// `base`'s tiles in place (which leaves the auto-fit column count untouched,
+// so zooming out shrinks tiles but leaves the freed-up space as blank
+// margin), this re-picks the column count for the zoomed tile size and
+// stretches tiles to exactly fill the container's width at that count — so
+// zooming out packs more of the same sessions into each row instead of
+// leaving deadspace, and zooming in packs fewer/bigger ones (typically
+// overflowing into a scroll, which is the point of zooming in).
+function applyFillZoom(
+    base: FillTileLayout,
+    containerW: number,
+    containerH: number,
+    count: number,
+    gap: number,
+    headerH: number,
+    zoom: number,
+    aspect = 16 / 9
+): FillTileLayout {
+    if (zoom === 1 || containerW <= 0) return base;
+    const cols = colsForFillZoom(base.tileW, containerW, gap, count, zoom);
+    const rows = Math.ceil(count / cols);
+    const tileW = (containerW - gap * (cols - 1)) / cols;
+    const bodyH = tileW / aspect;
+    const tileH = bodyH + headerH;
+    const fitsVertically = rows * tileH + gap * (rows - 1) <= containerH;
+    return { cols, rows, tileW, tileH, fitsVertically };
+}
+
+// The zoom slider's usable min/max: past either end, colsForFillZoom has
+// already saturated at `count` columns (fully zoomed out) or 1 column (fully
+// zoomed in), so tileW stops changing and further dragging does nothing. A
+// fixed min/max either left most of the slider dead or cut off before
+// reaching 1-2 columns, depending on session count and window width — so
+// derive it from those instead: solve colsForFillZoom's rounding boundary for
+// the zoom where it crosses into the 1-column and count-column buckets.
+function fillZoomBounds(base: FillTileLayout, containerW: number, gap: number, count: number): { min: number; max: number } {
+    if (containerW <= 0 || base.tileW <= 0 || count <= 1) return { min: 0.5, max: 1.3 };
+    const zoomAtBoundary = (n: number) => ((containerW + gap) / n - gap) / base.tileW;
+    // Small multipliers nudge past the exact rounding boundary so the ends of
+    // the slider reliably reach 1 column / `count` columns rather than
+    // landing right on the edge where floating point could round either way.
+    const max = Math.max(1, zoomAtBoundary(1.5) * 1.02);
+    const min = Math.min(1, Math.max(0.1, zoomAtBoundary(count - 0.5) * 0.98));
+    return { min, max };
+}
+
 interface EC2Instance {
     id: string;
     name: string;
@@ -410,6 +464,44 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     // non-empty — it unmounts/remounts as those flip, and each mount needs
     // its own ResizeObserver rather than one wired up only on first render.
     const [fillContainerSize, setFillContainerSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+    // Zoom multiplier applied on top of computeFillLayout's auto-fit tile
+    // size (1 = auto-fit, unchanged from before this existed). Adjustable via
+    // the popup slider shown when the Fill Grid button is clicked.
+    const [fillZoom, setFillZoom] = useState(1);
+    const [showFillZoomSlider, setShowFillZoomSlider] = useState(false);
+    // Hide the zoom popup the instant the user leaves Fill Grid for another
+    // layout — it otherwise only closed on the popup's own onMouseLeave,
+    // which doesn't fire just because the layout changed under it.
+    useEffect(() => {
+        if (gridLayout !== 4) setShowFillZoomSlider(false);
+    }, [gridLayout]);
+    // Last render's zoom bounds, so the pin-to-edge effect below can tell
+    // whether fillZoom was sitting at the old min/max (see that effect).
+    const fillZoomBoundsPrev = useRef<{ min: number; max: number }>({ min: 0.5, max: 1.3 });
+    // Single-clicking a pane's header "maximizes" it to fill the whole main
+    // content area in-page, on top of whatever grid layout is active — the
+    // other panes stay mounted (just hidden) so their sessions don't drop.
+    // Click the header again (same instanceId) to restore.
+    const [maximizedId, setMaximizedId] = useState<string | null>(null);
+    // If the maximized session disconnects on its own (tunnel error, guacd
+    // dropping, etc. — anything that removes it from activeSessions without
+    // going through the header click), maximizedId would otherwise keep
+    // pointing at a pane that no longer exists. Every *other* pane's
+    // isHiddenByMaximize check only looks at "is maximizedId set", not
+    // "does it still resolve to a live session" — so the whole grid stayed
+    // hidden behind nothing, reading as a black screen until reload.
+    useEffect(() => {
+        if (maximizedId && !activeSessions[maximizedId]) setMaximizedId(null);
+    }, [maximizedId, activeSessions]);
+    // GuacamoleClient/RustDeskClient's `layoutVersion` prop needs to bump for
+    // *any* change that resizes a pane's cell outside its own ResizeObserver
+    // — that's every gridLayout switch, but now also maximize/restore, since
+    // hiding a pane's siblings (or un-hiding them) reflows the grid the same
+    // way a layout switch does.
+    const [resizeSignal, setResizeSignal] = useState(0);
+    useEffect(() => {
+        setResizeSignal(s => s + 1);
+    }, [gridLayout, maximizedId]);
     const fillResizeObserver = useRef<ResizeObserver | null>(null);
     const setFillGridRef = useCallback((el: HTMLDivElement | null) => {
         fillResizeObserver.current?.disconnect();
@@ -448,7 +540,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
             el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
             el.getBoundingClientRect(); // force the browser to register the "from" state
             requestAnimationFrame(() => {
-                el.style.transition = 'transform 200ms ease-out';
+                el.style.transition = 'transform 60ms ease-out';
                 el.style.transform = '';
             });
             el.addEventListener('transitionend', () => {
@@ -1357,7 +1449,11 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
 
     const getGridClass = () => {
         switch (gridLayout) {
-            case 1: return 'grid grid-cols-1 auto-rows-fr';
+            // Single view: rows are sized to each card's own natural (full-width,
+            // 16:9) height rather than squeezed to an equal auto-rows-fr share of
+            // the viewport — the cards should render full size and the page
+            // scrolls to reach the rest, not shrink to fit them all on screen.
+            case 1: return 'grid grid-cols-1';
             case 2: return 'grid grid-cols-1 md:grid-cols-2 auto-rows-fr';
             case 3: return 'flex overflow-x-auto snap-x snap-mandatory'; // Horizontal
             // Fill: column/row count and tile size are computed dynamically
@@ -1371,9 +1467,32 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     const activeSessionList = Object.values(activeSessions);
     // Render in explicit drag order; ignore ids no longer connected.
     const orderedSessions = sessionOrder.map(id => activeSessions[id]).filter(Boolean) as ActiveSession[];
-    const fillLayout = gridLayout === 4
+    const autoFillLayout = gridLayout === 4
         ? computeFillLayout(fillContainerSize.w, fillContainerSize.h, orderedSessions.length, GRID_GAP, CARD_HEADER_H)
         : null;
+    const fillLayout = autoFillLayout
+        ? applyFillZoom(autoFillLayout, fillContainerSize.w, fillContainerSize.h, orderedSessions.length, GRID_GAP, CARD_HEADER_H, fillZoom)
+        : null;
+    const fillZoomBoundsVal = autoFillLayout
+        ? fillZoomBounds(autoFillLayout, fillContainerSize.w, GRID_GAP, orderedSessions.length)
+        : { min: 0.5, max: 1.3 };
+    // fillZoomBoundsVal is recomputed from live container/session state, so it
+    // shifts as the window resizes, the sidebar toggles, or sessions
+    // connect/disconnect. Without this, dragging the slider to its right edge
+    // (fillZoom = that render's max) would visibly fall short of the new
+    // right edge the next time bounds shrink the *other* direction — the
+    // thumb stays at the old absolute value while the track's max moves out
+    // from under it. Keep it pinned to whichever edge (or clamped into range)
+    // it was on last render instead of drifting.
+    useEffect(() => {
+        const prev = fillZoomBoundsPrev.current;
+        fillZoomBoundsPrev.current = fillZoomBoundsVal;
+        setFillZoom(z => {
+            if (z >= prev.max - 1e-6) return fillZoomBoundsVal.max;
+            if (z <= prev.min + 1e-6) return fillZoomBoundsVal.min;
+            return Math.min(fillZoomBoundsVal.max, Math.max(fillZoomBoundsVal.min, z));
+        });
+    }, [fillZoomBoundsVal.min, fillZoomBoundsVal.max]);
 
     const renderSessionTile = (session: ActiveSession) => {
         // Resolve name/IP from the live instance lists so a session restored
@@ -1387,6 +1506,11 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
         const os = custom?.os || ec2?.os || '';
         const swapCtrlCmd = os === 'macos' && !!(custom?.swapKeys || ec2?.swapKeys);
         const isDropTarget = dragOverId === session.instanceId && dragId !== session.instanceId;
+        const isMaximized = maximizedId === session.instanceId;
+        // Other panes stay mounted while one is maximized — just hidden —
+        // so their sessions don't drop and reconnect when restored.
+        const isHiddenByMaximize = maximizedId !== null && !isMaximized;
+        const toggleMaximize = () => setMaximizedId(id => id === session.instanceId ? null : session.instanceId);
         return (
         <div
             key={session.instanceId}
@@ -1394,7 +1518,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
             onDragOver={(e) => { if (dragId) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (dragOverId !== session.instanceId) setDragOverId(session.instanceId); } }}
             onDragLeave={() => { if (dragOverId === session.instanceId) setDragOverId(null); }}
             onDrop={(e) => { e.preventDefault(); reorderSession(dragId, session.instanceId); setDragId(null); setDragOverId(null); }}
-            className={`flex items-center justify-center min-w-0 rounded-lg transition-[opacity,transform,box-shadow] duration-150 ease-out ${gridLayout === 4 ? 'overflow-hidden' : 'min-h-[240px]'} ${gridLayout === 3 ? 'min-w-full shrink-0 snap-center h-full' : ''} ${isDropTarget ? 'ring-2 ring-blue-400 ring-offset-2 ring-offset-black scale-[1.015]' : ''} ${dragId === session.instanceId ? 'opacity-40 scale-[0.97]' : ''}`}
+            className={`flex items-center justify-center min-w-0 rounded-lg transition-[opacity,transform,box-shadow] duration-150 ease-out ${gridLayout === 4 ? 'overflow-hidden' : 'min-h-[240px]'} ${gridLayout === 3 ? 'min-w-full shrink-0 snap-center h-full' : ''} ${isDropTarget ? 'ring-2 ring-blue-400 ring-offset-2 ring-offset-black scale-[1.015]' : ''} ${dragId === session.instanceId ? 'opacity-40 scale-[0.97]' : ''} ${isMaximized ? 'absolute inset-0 z-20 overflow-hidden' : ''} ${isHiddenByMaximize ? 'hidden' : ''}`}
         >
             {custom?.protocol === 'rustdesk' ? (
                 <RustDeskClient
@@ -1402,6 +1526,9 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                     token={session.token}
                     name={name}
                     ip={ip}
+                    layoutVersion={resizeSignal}
+                    fitViewport={gridLayout !== 1}
+                    onToggleMaximize={toggleMaximize}
                     os={os}
                     swapCtrlCmd={swapCtrlCmd}
                     clipboard={sharedClipboard}
@@ -1418,6 +1545,9 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                     token={session.token}
                     name={name}
                     ip={ip}
+                    layoutVersion={resizeSignal}
+                    fitViewport={gridLayout !== 1}
+                    onToggleMaximize={toggleMaximize}
                     protocol={custom?.protocol || 'rdp'}
                     os={os}
                     swapCtrlCmd={swapCtrlCmd}
@@ -1435,7 +1565,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     };
 
     return (
-        <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col font-sans relative">
+        <div className="h-screen bg-slate-950 text-slate-200 flex flex-col font-sans relative overflow-hidden">
             {!isHeaderVisible && (
                 <button
                     onClick={() => setIsHeaderVisible(true)}
@@ -1491,13 +1621,35 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                     >
                         <Grid size={20} />
                     </button>
-                    <button
-                        onClick={() => changeGridLayout(4)}
-                        className={`p-2 rounded transition-colors ${gridLayout === 4 ? 'bg-slate-700 text-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
-                        title="Fill Grid"
-                    >
-                        <LayoutGrid size={20} />
-                    </button>
+                    <div className="relative">
+                        <button
+                            onClick={() => { changeGridLayout(4); setShowFillZoomSlider(true); }}
+                            className={`p-2 rounded transition-colors ${gridLayout === 4 ? 'bg-slate-700 text-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
+                            title="Fill Grid"
+                        >
+                            <LayoutGrid size={20} />
+                        </button>
+                        {showFillZoomSlider && (
+                            <div
+                                onMouseLeave={() => setShowFillZoomSlider(false)}
+                                className="absolute top-full mt-2 left-1/2 -translate-x-1/2 bg-slate-800 border border-slate-700 rounded-lg shadow-xl px-3 py-2 z-50 flex items-center"
+                            >
+                                <input
+                                    type="range"
+                                    min={fillZoomBoundsVal.min}
+                                    max={fillZoomBoundsVal.max}
+                                    // A fixed step snaps to a grid measured from `min`, which almost
+                                    // never lands exactly on `max` once bounds are computed dynamically
+                                    // (non-round numbers) — dragging/keying to the end would visibly stop
+                                    // short of the right edge. `any` lets it reach the exact min/max.
+                                    step="any"
+                                    value={fillZoom}
+                                    onChange={(e) => setFillZoom(Number(e.target.value))}
+                                    className="w-32 accent-blue-500"
+                                />
+                            </div>
+                        )}
+                    </div>
                     <div className="w-px h-6 bg-slate-700 mx-1"></div>
                     <button
                         onClick={() => setReorderMode(true)}
@@ -1713,38 +1865,56 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                 )}
 
                 {/* Main Content - Grid View */}
-                <main className="flex-1 bg-black p-3 overflow-y-auto">
+                <main className="flex-1 bg-black p-3 overflow-y-auto [scrollbar-gutter:stable]">
                     {orderedSessions.length === 0 ? (
                         <div className="h-full flex flex-col items-center justify-center text-slate-500">
                             <Maximize size={48} className="mb-4 opacity-20" />
                             <p className="text-lg">Select an instance to start a session</p>
                         </div>
-                    ) : gridLayout === 4 ? (
-                        // Fill: tiles are sized/packed dynamically (computeFillLayout)
-                        // to fit as many 16:9 cards on screen as possible, with rows
-                        // packed to their actual content height instead of stretched
-                        // fr rows — otherwise a couple of tall rows end up far apart.
+                    ) : (
+                        // Both branches below render the exact same wrapper shape
+                        // (this div and its one child) regardless of gridLayout,
+                        // varying only className/style — switching in or out of
+                        // Fill (gridLayout 4) used to swap between structurally
+                        // different JSX branches here, which made React unmount
+                        // and remount every session pane underneath (a fresh
+                        // Guacamole/RustDesk connection each time, hence a black
+                        // pane until it reconnected). Keeping one stable shape
+                        // lets React just update attributes on the existing DOM
+                        // and preserve the live session components across layout
+                        // switches.
+                        //
+                        // Fill (gridLayout 4): tiles are sized/packed dynamically
+                        // (computeFillLayout) to fit as many 16:9 cards on screen
+                        // as possible, with rows packed to their actual content
+                        // height instead of stretched fr rows — otherwise a
+                        // couple of tall rows end up far apart.
                         <div
                             ref={setFillGridRef}
-                            className="h-full w-full flex overflow-visible"
-                            style={{ justifyContent: 'center', alignItems: fillLayout?.fitsVertically ? 'center' : 'flex-start' }}
+                            className={gridLayout === 4 ? 'relative h-full w-full flex overflow-visible' : 'relative h-full w-full'}
+                            style={gridLayout === 4 ? { justifyContent: 'center', alignItems: fillLayout?.fitsVertically ? 'center' : 'flex-start' } : undefined}
                         >
-                            {fillLayout && (
-                                <div
-                                    className="grid"
-                                    style={{
-                                        gridTemplateColumns: `repeat(${fillLayout.cols}, ${fillLayout.tileW}px)`,
-                                        gridAutoRows: `${fillLayout.tileH}px`,
-                                        gap: `${GRID_GAP}px`,
-                                    }}
-                                >
-                                    {orderedSessions.map(renderSessionTile)}
-                                </div>
-                            )}
-                        </div>
-                    ) : (
-                        <div className={`gap-3 h-full ${getGridClass()}`}>
-                            {orderedSessions.map(renderSessionTile)}
+                            <div
+                                // Single view (1) deliberately omits h-full: an
+                                // `auto`-tracked CSS grid inside a *height-bound*
+                                // container proportionally shrinks its rows to
+                                // fit when their natural content size is more
+                                // than the container's fixed height — which
+                                // squeezed single-view cards exactly like
+                                // auto-rows-fr did, just via grid's own sizing
+                                // algorithm instead. Letting the grid itself grow
+                                // past the viewport (main's overflow-y-auto below
+                                // handles the rest) is what lets rows sit at
+                                // their natural full size.
+                                className={gridLayout === 4 ? 'grid' : `gap-3 ${gridLayout === 1 ? '' : 'h-full'} ${getGridClass()}`}
+                                style={gridLayout === 4 && fillLayout ? {
+                                    gridTemplateColumns: `repeat(${fillLayout.cols}, ${fillLayout.tileW}px)`,
+                                    gridAutoRows: `${fillLayout.tileH}px`,
+                                    gap: `${GRID_GAP}px`,
+                                } : undefined}
+                            >
+                                {orderedSessions.map(renderSessionTile)}
+                            </div>
                         </div>
                     )}
                 </main>
