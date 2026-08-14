@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
-import { Grid, LayoutGrid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check, Cpu, LogOut, ShieldCheck, ShieldOff } from 'lucide-react';
+import { Grid, Maximize, Square, PlayCircle, StopCircle, RefreshCw, PanelLeftClose, PanelLeftOpen, Plus, X, ChevronUp, ChevronDown, Settings, GalleryHorizontalEnd, Loader2, DollarSign, AlertTriangle, ArrowUpDown, GripVertical, Check, Cpu, LogOut, ShieldCheck, ShieldOff } from 'lucide-react';
 import { GuacamoleClient } from './GuacamoleClient';
 import { RustDeskClient } from './RustDeskClient';
 import { useDeviceClipboard } from './deviceClipboard';
@@ -446,7 +446,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     const [reorderMode, setReorderMode] = useState(false);
     // Transient notifications (connection failures, etc.).
     const [toasts, setToasts] = useState<Toast[]>([]);
-    const [gridLayout, setGridLayout] = useState<number>(2); // 1 = 1x1, 2 = 2x2, 4 = 4x4
+    const [gridLayout, setGridLayout] = useState<number>(4); // 1 = single view, 3 = horizontal, 4 = grid (fill)
     // FLIP-animate grid-layout switches: CSS can't reliably interpolate a
     // reflow that changes grid-template-columns/rows (or swaps grid<->flex
     // for horizontal scroll) — depending on direction and magnitude, browsers
@@ -466,10 +466,10 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     const [fillContainerSize, setFillContainerSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
     // Zoom multiplier applied on top of computeFillLayout's auto-fit tile
     // size (1 = auto-fit, unchanged from before this existed). Adjustable via
-    // the popup slider shown when the Fill Grid button is clicked.
+    // the popup slider shown when the Grid button is clicked.
     const [fillZoom, setFillZoom] = useState(1);
     const [showFillZoomSlider, setShowFillZoomSlider] = useState(false);
-    // Hide the zoom popup the instant the user leaves Fill Grid for another
+    // Hide the zoom popup the instant the user leaves Grid for another
     // layout — it otherwise only closed on the popup's own onMouseLeave,
     // which doesn't fire just because the layout changed under it.
     useEffect(() => {
@@ -493,6 +493,24 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     useEffect(() => {
         if (maximizedId && !activeSessions[maximizedId]) setMaximizedId(null);
     }, [maximizedId, activeSessions]);
+    // Maximizing hides every other pane, which collapses <main>'s scrollable
+    // content down to just the maximized pane — the browser then clamps
+    // scrollTop to fit (usually to 0), same as any element whose content
+    // shrinks. Restoring afterwards regrows the content back to its full
+    // height, but the browser has no memory of where scrollTop "should" be,
+    // so it stayed wherever the collapse left it — always the top. Save (see
+    // toggleMaximize below, which captures it *before* the collapse) and
+    // restore it ourselves across the toggle instead.
+    const mainRef = useRef<HTMLElement | null>(null);
+    const savedMainScrollTop = useRef(0);
+    const wasMaximized = useRef(false);
+    useLayoutEffect(() => {
+        const isMaximized = maximizedId !== null;
+        if (wasMaximized.current && !isMaximized && mainRef.current) {
+            mainRef.current.scrollTop = savedMainScrollTop.current;
+        }
+        wasMaximized.current = isMaximized;
+    }, [maximizedId]);
     // GuacamoleClient/RustDeskClient's `layoutVersion` prop needs to bump for
     // *any* change that resizes a pane's cell outside its own ResizeObserver
     // — that's every gridLayout switch, but now also maximize/restore, since
@@ -1454,13 +1472,12 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
             // the viewport — the cards should render full size and the page
             // scrolls to reach the rest, not shrink to fit them all on screen.
             case 1: return 'grid grid-cols-1';
-            case 2: return 'grid grid-cols-1 md:grid-cols-2 auto-rows-fr';
             case 3: return 'flex overflow-x-auto snap-x snap-mandatory'; // Horizontal
-            // Fill: column/row count and tile size are computed dynamically
+            // Fill/Grid: column/row count and tile size are computed dynamically
             // (see computeFillLayout) and applied via inline style below, so
             // no Tailwind grid-cols/rows classes are needed here.
             case 4: return 'grid';
-            default: return 'grid grid-cols-1 auto-rows-fr';
+            default: return 'grid grid-cols-1';
         }
     };
 
@@ -1510,7 +1527,18 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
         // Other panes stay mounted while one is maximized — just hidden —
         // so their sessions don't drop and reconnect when restored.
         const isHiddenByMaximize = maximizedId !== null && !isMaximized;
-        const toggleMaximize = () => setMaximizedId(id => id === session.instanceId ? null : session.instanceId);
+        const toggleMaximize = () => {
+            // Capture scrollTop *before* the state update hides the other
+            // panes, not in a layout effect keyed on maximizedId — by the
+            // time that effect runs, React has already committed the
+            // hidden/absolute classes and the browser has already clamped
+            // scrollTop for the now-collapsed content, so reading it there
+            // would just see the already-clamped (usually 0) value.
+            if (maximizedId !== session.instanceId && mainRef.current) {
+                savedMainScrollTop.current = mainRef.current.scrollTop;
+            }
+            setMaximizedId(id => id === session.instanceId ? null : session.instanceId);
+        };
         return (
         <div
             key={session.instanceId}
@@ -1614,20 +1642,13 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                     >
                         <GalleryHorizontalEnd size={20} />
                     </button>
-                    <button
-                        onClick={() => changeGridLayout(2)}
-                        className={`p-2 rounded transition-colors ${gridLayout === 2 ? 'bg-slate-700 text-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
-                        title="2x2 Grid"
-                    >
-                        <Grid size={20} />
-                    </button>
                     <div className="relative">
                         <button
                             onClick={() => { changeGridLayout(4); setShowFillZoomSlider(true); }}
                             className={`p-2 rounded transition-colors ${gridLayout === 4 ? 'bg-slate-700 text-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-700/50'}`}
-                            title="Fill Grid"
+                            title="Grid"
                         >
-                            <LayoutGrid size={20} />
+                            <Grid size={20} />
                         </button>
                         {showFillZoomSlider && (
                             <div
@@ -1865,7 +1886,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                 )}
 
                 {/* Main Content - Grid View */}
-                <main className="flex-1 bg-black p-3 overflow-y-auto [scrollbar-gutter:stable]">
+                <main ref={mainRef} className="flex-1 bg-black p-3 overflow-y-auto [scrollbar-gutter:stable]">
                     {orderedSessions.length === 0 ? (
                         <div className="h-full flex flex-col items-center justify-center text-slate-500">
                             <Maximize size={48} className="mb-4 opacity-20" />
