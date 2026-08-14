@@ -568,7 +568,11 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
             }, { once: true });
         }
     }, [gridLayout]);
-    const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(() => {
+    // The user's remembered preference — only changed by explicit clicks on the
+    // show/hide sidebar buttons. The actually-rendered visibility (below, near
+    // activeSessionList) additionally forces the sidebar open whenever no
+    // sessions are active, without touching this stored preference.
+    const [sidebarPref, setSidebarPref] = useState<boolean>(() => {
         const stored = localStorage.getItem('rdm_sidebar');
         return stored !== null ? stored === 'true' : true;
     });
@@ -913,8 +917,8 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
 
     // UI State persistence
     useEffect(() => {
-        localStorage.setItem('rdm_sidebar', isSidebarVisible.toString());
-    }, [isSidebarVisible]);
+        localStorage.setItem('rdm_sidebar', sidebarPref.toString());
+    }, [sidebarPref]);
 
     useEffect(() => {
         localStorage.setItem('rdm_header', isHeaderVisible.toString());
@@ -1482,6 +1486,9 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     };
 
     const activeSessionList = Object.values(activeSessions);
+    // Force the sidebar open whenever nothing is in view, regardless of the
+    // stored preference; falls back to that preference once a session exists.
+    const isSidebarVisible = sidebarPref || activeSessionList.length === 0;
     // Render in explicit drag order; ignore ids no longer connected.
     const orderedSessions = sessionOrder.map(id => activeSessions[id]).filter(Boolean) as ActiveSession[];
     const autoFillLayout = gridLayout === 4
@@ -1708,7 +1715,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                     on the left edge and fully invisible until hovered. */}
                 {!isSidebarVisible && (
                     <button
-                        onClick={() => setIsSidebarVisible(true)}
+                        onClick={() => setSidebarPref(true)}
                         className="fixed top-1/2 left-0 -translate-y-1/2 bg-slate-800 text-slate-400 hover:text-white py-6 px-1 rounded-r-lg border-r border-y border-slate-700 shadow-xl z-30 opacity-20 hover:opacity-100 hover:z-50 transition-all flex items-center justify-center"
                         title="Show Sidebar"
                     >
@@ -1877,7 +1884,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
 
                 {isSidebarVisible && (
                     <button
-                        onClick={() => setIsSidebarVisible(false)}
+                        onClick={() => setSidebarPref(false)}
                         className="fixed top-1/2 left-64 -translate-y-1/2 bg-slate-800 text-slate-400 hover:text-white w-5 py-6 rounded-r-lg border-r border-y border-slate-700 shadow-md z-20 opacity-40 hover:opacity-100 hover:z-50 transition-opacity flex items-center justify-center"
                         title="Hide Sidebar"
                     >
