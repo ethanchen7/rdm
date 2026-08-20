@@ -354,14 +354,16 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, layoutVersio
         // guacamole-common-js turns each wheel event into up/down button
         // clicks once accumulated scroll distance crosses this many pixels
         // (default 53) — the RealVNC viewer exposes the identical concept as
-        // "ScrollWheelThreshold" under its Expert settings. macOS's built-in
-        // Screen Sharing VNC server scrolls a tiny fraction per click no
-        // matter which client drives it, so it needs a much lower threshold
-        // to feel normal; 1 is what worked for RealVNC users hitting the same
-        // thing. Windows VNC servers already scroll fine and aren't affected
-        // by this (it's VNC-only, RDP is untouched).
+        // "ScrollWheelThreshold" under its Expert settings. 1 was tried here
+        // previously to make VNC scrolling feel less sluggish, but it's way
+        // too aggressive: a single wheel tick's full deltaY collapses into
+        // dozens of clicks, each read as its own scroll notch, so one tick
+        // can blow past hundreds of lines. macOS VNC targets scroll a
+        // shorter distance per notch than Windows/Linux ones do, so they
+        // need a lower threshold to feel the same; tuned by feel per-OS.
+        // VNC-only; RDP is untouched.
         // @ts-ignore — missing from the (outdated) type defs, but present at runtime
-        if (protocol === 'vnc') mouse.scrollThreshold = 1;
+        if (protocol === 'vnc') mouse.scrollThreshold = os === 'macos' ? 6 : 18;
         // @ts-ignore
         mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = (mouseState: any) => {
             const scale = display.getScale() || 1;

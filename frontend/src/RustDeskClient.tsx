@@ -307,9 +307,14 @@ export const RustDeskClient: React.FC<Props> = ({ token, name, ip, layoutVersion
             positionCursor();
             send({ type: 'mouse', mask: MOUSE_TYPE_UP | (buttonBit(e.button) << 3), x, y, modifiers: modifiersArray() });
         };
+        // Each wheel event sends one scroll "notch" — macOS targets move a
+        // shorter distance per notch than Windows/Linux ones do, so they get
+        // a bigger step to feel the same (see the matching scrollThreshold
+        // tuning in GuacamoleClient).
+        const wheelStep = os === 'macos' ? 3 : 1;
         const onWheel = (e: WheelEvent) => {
             e.preventDefault();
-            send({ type: 'mouse', mask: MOUSE_TYPE_WHEEL, x: 0, y: e.deltaY > 0 ? -1 : 1, modifiers: modifiersArray() });
+            send({ type: 'mouse', mask: MOUSE_TYPE_WHEEL, x: 0, y: e.deltaY > 0 ? -wheelStep : wheelStep, modifiers: modifiersArray() });
         };
         const onContextMenu = (e: MouseEvent) => e.preventDefault();
 
