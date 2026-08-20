@@ -853,6 +853,14 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
         const stored = localStorage.getItem('rdm_header');
         return stored !== null ? stored === 'true' : true;
     });
+    // Whether hovering a session pane focuses it (so keyboard/mouse input
+    // goes there immediately), vs requiring a click. Hover-to-focus is handy
+    // with one session but makes it easy to steal focus from the session
+    // you're typing into just by moving the mouse across a multi-session grid.
+    const [focusOnHover, setFocusOnHover] = useState<boolean>(() => {
+        const stored = localStorage.getItem('rdm_focus_on_hover');
+        return stored !== null ? stored === 'true' : true;
+    });
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     const [customInstances, setCustomInstances] = useState<CustomInstance[]>([]);
@@ -1196,6 +1204,9 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
     useEffect(() => {
         localStorage.setItem('rdm_header', isHeaderVisible.toString());
     }, [isHeaderVisible]);
+    useEffect(() => {
+        localStorage.setItem('rdm_focus_on_hover', focusOnHover.toString());
+    }, [focusOnHover]);
 
     // An instance counts as transitioning while we're waiting on a start/stop we
     // sent (AWS can still report the old state for a moment) and for as long as
@@ -1868,6 +1879,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                     onToggleMaximize={toggleMaximize}
                     os={os}
                     swapCtrlCmd={swapCtrlCmd}
+                    focusOnHover={focusOnHover}
                     clipboard={sharedClipboard}
                     onClipboard={publishClipboard}
                     onDisconnect={() => disconnectInstance(session.instanceId)}
@@ -1888,6 +1900,7 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                     protocol={custom?.protocol || 'rdp'}
                     os={os}
                     swapCtrlCmd={swapCtrlCmd}
+                    focusOnHover={focusOnHover}
                     clipboard={sharedClipboard}
                     onClipboard={publishClipboard}
                     onDisconnect={() => disconnectInstance(session.instanceId)}
@@ -2838,6 +2851,14 @@ function App({ authStatus, onAuthRefresh }: AppProps) {
                                     setGlobalSettings(newSet);
                                     localStorage.setItem('rdm_settings', JSON.stringify(newSet));
                                 }} className="w-4 h-4" />
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <label className="block text-sm text-slate-300">Focus Session on Hover</label>
+                                    <p className="text-xs text-slate-500">Moving the mouse over a session focuses it, so keyboard input goes there immediately. Off requires a click, so hovering across a multi-session grid doesn't steal focus.</p>
+                                </div>
+                                <input type="checkbox" checked={focusOnHover} onChange={e => setFocusOnHover(e.target.checked)} className="w-4 h-4" />
                             </div>
 
                             <div className="border-t border-slate-700 pt-4">

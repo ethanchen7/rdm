@@ -37,6 +37,10 @@ interface Props {
     // where the user wants the physical key they'd hit for a shortcut on a PC
     // (Ctrl) to land as Cmd on the Mac, and vice versa.
     swapCtrlCmd?: boolean;
+    // Whether hovering this pane focuses it (default true). Off requires an
+    // explicit click, so moving the mouse across a multi-session grid doesn't
+    // steal keyboard focus from whichever session the user is actually typing into.
+    focusOnHover?: boolean;
     onDisconnect: () => void;
     // Issues a fresh token for this same session (see refreshInstance in
     // App.tsx). Optional so callers that don't support it can omit the button.
@@ -58,7 +62,7 @@ interface Props {
     onClipboard: (text: string) => void;
 }
 
-export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, layoutVersion, fitViewport = true, onToggleMaximize, protocol, os, swapCtrlCmd, onDisconnect, onRefresh, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
+export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, layoutVersion, fitViewport = true, onToggleMaximize, protocol, os, swapCtrlCmd, focusOnHover = true, onDisconnect, onRefresh, onError, clipboard, onClipboard, onReorderDragStart, onReorderDragEnd }) => {
     const rootRef = useRef<HTMLDivElement>(null);
     const headerRef = useRef<HTMLDivElement>(null);
     const displayRef = useRef<HTMLDivElement>(null);
@@ -504,7 +508,7 @@ export const GuacamoleClient: React.FC<Props> = ({ token, name, ip, layoutVersio
             className="relative bg-slate-900 border-2 border-slate-700 rounded-lg overflow-hidden flex flex-col group focus-within:border-yellow-400 focus-within:shadow-[0_0_15px_rgba(250,204,21,0.6)] transition-[border-color,box-shadow] duration-150 max-w-full max-h-full [contain:content]"
             style={box ? { width: box.w } : { width: '100%', height: '100%' }}
             onClick={() => displayRef.current?.focus({ preventScroll: true })}
-            onMouseEnter={() => displayRef.current?.focus({ preventScroll: true })}
+            onMouseEnter={focusOnHover ? () => displayRef.current?.focus({ preventScroll: true }) : undefined}
         >
             {/* Static header above the session. Controls only reveal on hover
                 of the bar itself (not the whole card) so a live desktop isn't
