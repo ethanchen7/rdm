@@ -6,14 +6,28 @@
 // non-host platform/arch via the standard npm_config_platform/
 // npm_config_arch override convention, so this fetches the win32/x64
 // build of each directly into backend/node_modules right before packaging
-// — no Windows machine needed for this part. bcrypt needs no action: it
-// ships prebuilt binaries for every platform (including win32) bundled in
-// the npm package itself, self-selected at require() time.
+// — no Windows machine needed for this part. bcrypt ships prebuilt binaries
+// for every platform (including win32) bundled in the npm package itself,
+// self-selected at require() time — see the build/ cleanup below though.
 const { execFileSync } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 
 const backendNodeModules = path.join(__dirname, '..', 'backend', 'node_modules');
 const env = { ...process.env, npm_config_platform: 'win32', npm_config_arch: 'x64' };
+
+// bcrypt's loader (node-gyp-build) checks build/Release/*.node BEFORE its own
+// bundled prebuilds/<platform>-<arch>/ directory. If anything ever compiles
+// bcrypt from source for another platform (e.g. `electron-rebuild` run for
+// the macOS build), that leftover build/Release output shadows the correct
+// platform's prebuild here and crashes at runtime with "not a valid Win32
+// application". bcrypt never needs building — remove any stale build output
+// so it always falls through to the bundled prebuilds.
+const bcryptBuildDir = path.join(backendNodeModules, 'bcrypt', 'build');
+if (fs.existsSync(bcryptBuildDir)) {
+    console.log('[fetch-win-natives] removing stale bcrypt/build (would shadow the win32 prebuild)...');
+    fs.rmSync(bcryptBuildDir, { recursive: true, force: true });
+}
 
 console.log('[fetch-win-natives] sqlite3 (win32-x64, N-API prebuild)...');
 execFileSync(
