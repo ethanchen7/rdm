@@ -62,20 +62,30 @@ Browser (React SPA)  ──WebSocket──►  Backend (Express + guacamole-lite
    ```
 
 2. **Start guacd**
+
+   With Docker installed and running, this step is automatic: on startup, if
+   `GUACD_HOST` is this machine and guacd isn't reachable, the backend runs
+   `docker start guacd` and — if no such container exists yet —
    ```bash
    docker run -d --name guacd --restart unless-stopped -p 4822:4822 guacamole/guacd
    ```
+   on your behalf. Set `GUACD_AUTOSTART=false` in `backend/.env` to disable
+   this and run that command yourself instead.
    > Optional — larger clipboard: the stock image caps the clipboard at 256 KiB.
    > See [Bigger clipboard limit](#bigger-clipboard-limit-optional) to build an
-   > image with a higher cap.
+   > image with a higher cap — auto-start only ever creates the plain
+   > `guacamole/guacd` image, so run the custom-image `docker run` by hand
+   > once and it'll be reused (by name) from then on.
 
    The Settings modal shows whether guacd is reachable and can start, stop, or
    restart it — it runs `docker <action> guacd`, so the account running the
    backend needs Docker access (i.e. be in the `docker` group). Running guacd as
    a systemd unit instead? Set `GUACD_SERVICE_CMD="sudo -n systemctl"` in
-   `backend/.env` and add a passwordless sudoers rule for those three commands.
-   Set `GUACD_SERVICE=` (blank) to remove the buttons. The Start/Stop/Restart
-   buttons are only reachable once signed in — see [Authentication](#authentication).
+   `backend/.env` (this also disables the `docker run` auto-create fallback,
+   since it only applies to the literal default Docker setup) and add a
+   passwordless sudoers rule for those three commands. Set `GUACD_SERVICE=`
+   (blank) to remove the buttons. The Start/Stop/Restart buttons are only
+   reachable once signed in — see [Authentication](#authentication).
 
 3. **Configure the backend**
    ```bash

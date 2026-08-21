@@ -263,6 +263,11 @@ const waitForGuacd = async (expectReachable: boolean, timeoutMs = 6000) => {
 
 const execFileAsync = promisify(execFile);
 
+// Whether GUACD_HOST points at this machine — auto-starting only makes sense
+// for a local companion container/service, never for a guacd running on some
+// other host, where "start a container here" would be meaningless.
+const GUACD_IS_LOCAL = ['127.0.0.1', 'localhost', '::1'].includes(GUACD_HOST);
+
 // Service control for guacd. `<cmd> <action> <service>` — which suits the
 // documented Docker setup as-is (`docker restart guacd`) and equally a systemd
 // unit via GUACD_SERVICE_CMD='sudo -n systemctl'. Leaving GUACD_SERVICE blank
@@ -285,6 +290,49 @@ const guacdStatus = (probe: { reachable: boolean; error?: string }) => ({
     service: GUACD_SERVICE,
     error: probe.reachable ? undefined : guacdUnreachableMessage(probe.error)
 });
+
+// Tries to bring guacd up on its own at server startup, so a Docker-based
+// install doesn't need the user to remember a `docker run` command before
+// their first connection. Set GUACD_AUTOSTART=false to opt out. Runs in the
+// background — never blocks the HTTP server from accepting requests, since
+// Docker/RDP aren't needed for a RustDesk-only session.
+const GUACD_AUTOSTART = process.env.GUACD_AUTOSTART !== 'false';
+
+async function ensureGuacdRunning(): Promise<void> {
+    if (!GUACD_AUTOSTART || !GUACD_IS_LOCAL || !GUACD_SERVICE) return;
+    const [cmd, ...prefixArgs] = GUACD_SERVICE_CMD.split(/\s+/).filter(Boolean);
+    if (!cmd) return;
+
+    const probe = await probeGuacd();
+    if (probe.reachable) return;
+
+    console.log(`guacd not reachable at startup — attempting '${GUACD_SERVICE_CMD} start ${GUACD_SERVICE}'...`);
+    try {
+        await execFileAsync(cmd, [...prefixArgs, 'start', GUACD_SERVICE], { timeout: GUACD_ACTION_TIMEOUT_MS });
+    } catch (startErr: any) {
+        // `docker start` fails this way when the container has never been
+        // created on this host yet — only meaningful to retry with `docker
+        // run` for the literal documented Docker setup, not an arbitrary
+        // GUACD_SERVICE_CMD (e.g. a systemd unit either exists or it doesn't).
+        if (GUACD_SERVICE_CMD.trim() !== 'docker') {
+            console.error(`Could not auto-start guacd via '${GUACD_SERVICE_CMD}':`, (startErr.stderr || startErr.message || '').toString().trim());
+            return;
+        }
+        console.log(`'docker start ${GUACD_SERVICE}' failed (likely no such container yet) — creating it with 'docker run'...`);
+        try {
+            await execFileAsync('docker', [
+                'run', '-d', '--name', GUACD_SERVICE, '--restart', 'unless-stopped',
+                '-p', `${GUACD_PORT}:4822`, 'guacamole/guacd',
+            ], { timeout: GUACD_ACTION_TIMEOUT_MS });
+        } catch (runErr: any) {
+            console.error('Could not auto-start guacd:', (runErr.stderr || runErr.message || '').toString().trim());
+            return;
+        }
+    }
+
+    const result = await waitForGuacd(true, 15000);
+    console.log(result.reachable ? 'guacd is now reachable.' : `guacd still unreachable after auto-start attempt: ${result.error}`);
+}
 
 // Polled by the frontend when a session dies, to say whether guacd was the
 // reason rather than the remote desktop itself.
@@ -899,6 +947,9 @@ initDb().then(() => {
         const scheme = (TLS_CERT && TLS_KEY) ? 'https' : 'http';
         console.log(`Server listening on ${scheme}://localhost:${PORT}`);
     });
+    // Fire-and-forget: don't hold up accepting requests on Docker/guacd,
+    // which a RustDesk-only session never needs anyway.
+    ensureGuacdRunning().catch(err => console.error('guacd auto-start failed:', err));
 }).catch(err => {
     console.error("Failed to initialize database:", err);
 });
