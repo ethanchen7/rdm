@@ -1,3 +1,4 @@
+import './dataDir';
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';

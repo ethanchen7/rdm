@@ -1,10 +1,8 @@
+import { DATA_DIR } from './dataDir';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import crypto from 'crypto';
-import dotenv from 'dotenv';
 import path from 'path';
-
-dotenv.config();
 
 // Key must be exactly 32 bytes for AES-256-CBC
 const DB_CRYPT_KEY = Buffer.from((process.env.GUAC_CRYPT_KEY || 'MySuperSecretKeyForGuacamoleLite').padEnd(32, '0').slice(0, 32));
@@ -13,7 +11,7 @@ export let db: any = null;
 
 export async function initDb() {
     db = await open({
-        filename: path.join(__dirname, '..', 'rdm.sqlite'),
+        filename: path.join(DATA_DIR, 'rdm.sqlite'),
         driver: sqlite3.Database
     });
 

@@ -11,6 +11,12 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import { EventEmitter } from 'events';
+import ffmpegStatic from 'ffmpeg-static';
+
+// Prefer an explicit override, then the statically bundled binary (so a
+// packaged/Electron install doesn't need ffmpeg on PATH), then fall back to
+// PATH lookup — matches the pre-existing behavior for non-bundled deploys.
+const FFMPEG_PATH = process.env.FFMPEG_PATH || ffmpegStatic || 'ffmpeg';
 
 const JPEG_SOI = Buffer.from([0xff, 0xd8]);
 const JPEG_EOI = Buffer.from([0xff, 0xd9]);
@@ -63,7 +69,7 @@ export class Vp9JpegDecoder extends EventEmitter {
 
   constructor(width: number, height: number) {
     super();
-    this.#proc = spawn('ffmpeg', [
+    this.#proc = spawn(FFMPEG_PATH, [
       '-hide_banner',
       '-loglevel', 'error',
       // Without this, ffmpeg's default decode lookahead held ~16 frames

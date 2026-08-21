@@ -1,3 +1,4 @@
+import './dataDir';
 import type { Request } from 'express';
 
 // Parsed once at startup from TRUSTED_LAN_CIDRS, e.g.

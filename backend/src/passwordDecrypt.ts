@@ -1,9 +1,10 @@
+import { DATA_DIR } from './dataDir';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { EC2Client, GetPasswordDataCommand } from '@aws-sdk/client-ec2';
 
-const pemPath = path.resolve(process.cwd(), 'key.pem');
+const pemPath = path.join(DATA_DIR, 'key.pem');
 
 export async function getWindowsPassword(ec2: EC2Client, instanceId: string): Promise<string | null> {
     // If the user hasn't provided a key.pem, fallback to environment variable

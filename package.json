@@ -1,12 +1,58 @@
 {
   "name": "rdm",
   "version": "1.0.0",
+  "main": "electron/main.js",
   "scripts": {
     "start:backend": "cd backend && npx ts-node src/index.ts",
     "start:frontend": "cd frontend && npm run dev",
-    "start": "npx concurrently \"npm run start:backend\" \"npm run start:frontend\""
+    "start": "npx concurrently \"npm run start:backend\" \"npm run start:frontend\"",
+    "build:frontend": "cd frontend && npm run build",
+    "build:backend": "cd backend && npm run build",
+    "build:all": "npm run build:frontend && npm run build:backend",
+    "rebuild:native:mac": "electron-rebuild --force --module-dir backend --which-module bcrypt,sqlite3",
+    "rebuild:native:win": "node scripts/fetch-win-natives.js",
+    "electron:dev": "npm run build:all && npm run rebuild:native:mac && electron .",
+    "dist:mac": "npm run build:all && npm run rebuild:native:mac && electron-builder --mac",
+    "dist:win": "npm run build:all && npm run rebuild:native:win && electron-builder --win",
+    "dist": "npm run dist:mac && npm run dist:win"
   },
   "dependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "get-port": "^7.2.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.1",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.rdm.desktop",
+    "productName": "RDm",
+    "icon": "build/icon.png",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      { "from": "backend/dist", "to": "backend/dist" },
+      { "from": "backend/node_modules", "to": "backend/node_modules" },
+      { "from": "backend/.env.example", "to": "backend/.env.example" },
+      { "from": "frontend/dist", "to": "frontend/dist" }
+    ],
+    "asar": true,
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.utilities"
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    }
   }
 }

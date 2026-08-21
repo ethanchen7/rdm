@@ -1,4 +1,5 @@
 /// <reference path="./guacamole-lite.d.ts" />
+import { DATA_DIR } from './dataDir';
 import express from 'express';
 import http from 'http';
 import https from 'https';
@@ -8,7 +9,6 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
 import path from 'path';
 import { EC2Client, DescribeInstancesCommand, StartInstancesCommand, StopInstancesCommand, DescribeInstanceTypesCommand, DescribeInstanceTypeOfferingsCommand, ModifyInstanceAttributeCommand } from '@aws-sdk/client-ec2';
 import { CostExplorerClient, GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
@@ -22,8 +22,6 @@ import { initDb, addCustomInstance, updateCustomInstance, getCustomInstances, de
 import { authRouter, requireAuth } from './auth';
 // @ts-ignore
 import Crypt from 'guacamole-lite/lib/Crypt';
-
-dotenv.config();
 
 // guacamole-lite's ClientConnection constructor catches a bad/missing token,
 // tries to close gracefully — but Server.js calls .connect() on it right
@@ -58,8 +56,11 @@ if (process.env.TRUST_PROXY) {
 // Point TLS_CERT/TLS_KEY at a cert + key (self-signed, mkcert, or a real cert);
 // with neither set it serves plain HTTP. guacamole-lite attaches to whichever
 // server is created below, so the WebSocket follows the same scheme (ws/wss).
-const TLS_CERT = process.env.TLS_CERT;
-const TLS_KEY = process.env.TLS_KEY;
+// Relative paths resolve against DATA_DIR (not cwd, which the Electron
+// packaging doesn't control) — absolute paths are left as-is.
+const resolveDataPath = (p: string) => (path.isAbsolute(p) ? p : path.join(DATA_DIR, p));
+const TLS_CERT = process.env.TLS_CERT ? resolveDataPath(process.env.TLS_CERT) : undefined;
+const TLS_KEY = process.env.TLS_KEY ? resolveDataPath(process.env.TLS_KEY) : undefined;
 let server: http.Server | https.Server;
 if (TLS_CERT && TLS_KEY) {
     server = https.createServer(
