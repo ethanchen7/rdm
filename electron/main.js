@@ -4,7 +4,7 @@
 // open a browser tab". No preload/IPC bridge is needed: the loaded page is
 // the same app that already works standalone in a browser, login flow and
 // all — it's just being shown in a native window here.
-const { app, BrowserWindow, Menu, shell } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -15,6 +15,41 @@ const PRODUCT_NAME = 'RDm';
 const PREFERRED_PORT = 3010;
 
 app.setName(PRODUCT_NAME);
+
+// --- crash visibility -------------------------------------------------------
+// A double-clicked packaged app has no attached terminal, so console.error
+// alone is invisible — any startup failure previously meant the process just
+// quit with zero feedback ("nothing happens when I click the icon"). Log to
+// a file in userData and show a dialog for anything fatal, in both the
+// startup path and any later uncaught error.
+function logPath() {
+    return path.join(app.getPath('userData'), 'main.log');
+}
+
+function log(line) {
+    console.log(line);
+    try {
+        fs.mkdirSync(app.getPath('userData'), { recursive: true });
+        fs.appendFileSync(logPath(), `[${new Date().toISOString()}] ${line}\n`);
+    } catch {
+        // userData dir itself may not be writable/creatable yet — nothing more we can do.
+    }
+}
+
+function fatal(err) {
+    const message = err && err.stack ? err.stack : String(err);
+    log(`FATAL: ${message}`);
+    try {
+        dialog.showErrorBox(`${PRODUCT_NAME} failed to start`, `${message}\n\nLog: ${logPath()}`);
+    } catch {
+        // dialog needs app to be ready; if we're not there yet this just no-ops.
+    }
+    app.quit();
+    process.exit(1);
+}
+
+process.on('uncaughtException', fatal);
+process.on('unhandledRejection', (reason) => fatal(reason instanceof Error ? reason : new Error(String(reason))));
 
 // --- macOS PATH fix -------------------------------------------------------
 // GUI apps launched from Finder/Dock on macOS get a minimal PATH (usually
@@ -57,6 +92,30 @@ function ensureEnvFile(dataDir, envExamplePath) {
         `GUAC_CRYPT_KEY=${key}`
     );
     fs.writeFileSync(envPath, contents);
+}
+
+// Avoids the get-port package on purpose: it's ESM-only, and a dynamic
+// import() of an ESM dependency from inside a packaged app's asar archive is
+// a known rough edge on Windows (asar-aware file:// URL resolution for
+// import() has had platform-specific bugs) — not worth the risk for
+// something this simple. Tries the preferred port first, then walks forward
+// until something binds.
+function findFreePort(preferred, attempts) {
+    return new Promise((resolve, reject) => {
+        const tryPort = (port, attemptsLeft) => {
+            const tester = net.createServer();
+            tester.once('error', () => {
+                tester.close();
+                if (attemptsLeft <= 0) reject(new Error(`No free port found near ${preferred}`));
+                else tryPort(port + 1, attemptsLeft - 1);
+            });
+            tester.once('listening', () => {
+                tester.close(() => resolve(port));
+            });
+            tester.listen(port, '127.0.0.1');
+        };
+        tryPort(preferred, attempts);
+    });
 }
 
 function waitForServer(port, timeoutMs) {
@@ -125,25 +184,26 @@ function buildMenu(dataDir) {
 }
 
 async function main() {
+    log(`Starting ${PRODUCT_NAME} (packaged=${app.isPackaged}, platform=${process.platform})`);
     fixMacPath();
 
     const dataDir = app.getPath('userData');
     const backendDir = app.isPackaged
         ? path.join(process.resourcesPath, 'backend')
         : path.join(__dirname, '..', 'backend');
+    log(`dataDir=${dataDir} backendDir=${backendDir}`);
 
     ensureEnvFile(dataDir, path.join(backendDir, '.env.example'));
 
-    // get-port is ESM-only (no `require()`) — a dynamic import works from
-    // this CommonJS file. Also a root dependency (not just backend's) so it
-    // resolves here regardless of packaged vs. dev layout.
-    const { default: getPort } = await import('get-port');
-    const port = await getPort({ port: [PREFERRED_PORT, ...Array.from({ length: 20 }, (_, i) => PREFERRED_PORT + i + 1)] });
+    const port = await findFreePort(PREFERRED_PORT, 20);
+    log(`Using port ${port}`);
 
     process.env.RDM_DATA_DIR = dataDir;
     process.env.PORT = String(port);
 
-    require(path.join(backendDir, 'dist', 'index.js'));
+    const backendEntry = path.join(backendDir, 'dist', 'index.js');
+    log(`Loading backend from ${backendEntry}`);
+    require(backendEntry);
 
     const win = new BrowserWindow({
         width: 1400,
@@ -160,9 +220,12 @@ async function main() {
 
     buildMenu(dataDir);
 
+    log('Waiting for backend to start listening...');
     await waitForServer(port, 15000);
+    log('Backend is up — loading window.');
     await win.loadURL(`http://127.0.0.1:${port}/`);
     win.show();
+    log('Window shown.');
 }
 
 const gotLock = app.requestSingleInstanceLock();
@@ -177,16 +240,13 @@ if (!gotLock) {
         }
     });
 
-    app.whenReady().then(main).catch((err) => {
-        console.error('[rdm] failed to start:', err);
-        app.quit();
-    });
+    app.whenReady().then(main).catch(fatal);
 
     app.on('window-all-closed', () => {
         if (process.platform !== 'darwin') app.quit();
     });
 
     app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) main();
+        if (BrowserWindow.getAllWindows().length === 0) main().catch(fatal);
     });
 }

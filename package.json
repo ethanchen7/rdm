@@ -17,8 +17,7 @@
     "dist": "npm run dist:mac && npm run dist:win"
   },
   "dependencies": {
-    "concurrently": "^8.2.2",
-    "get-port": "^7.2.0"
+    "concurrently": "^8.2.2"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.1",

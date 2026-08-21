@@ -3,6 +3,7 @@ node_modules
 dist
 release
 *.tsbuildinfo
+.DS_Store
 
 # Logs
 restart.log
